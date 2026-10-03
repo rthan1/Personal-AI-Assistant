@@ -1,5 +1,28 @@
+# Python virtual environment
 .venv/
+venv/
+
+# Environment variables / secrets
 .env
+.env.*
+!.env.example
+
+# Database files
 *.db
-token.json
+*.sqlite
+*.sqlite3
+
+# Python cache
 __pycache__/
+*.py[cod]
+
+# Credentials / tokens
+token.json
+
+# IDE files
+.idea/
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db
