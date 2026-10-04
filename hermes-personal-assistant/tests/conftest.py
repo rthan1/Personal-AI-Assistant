@@ -1,6 +1,7 @@
 import pytest
 from cryptography.fernet import Fernet
 
+from assistant.storage.contacts import ContactRepo
 from assistant.storage.db import connect
 from assistant.storage.memories import MemoryRepo
 from assistant.storage.pending_changes import PendingChangeRepo
@@ -32,3 +33,8 @@ def memories(conn, secret_key):
 @pytest.fixture
 def pending(conn):
     return PendingChangeRepo(conn)
+
+
+@pytest.fixture
+def contacts(conn, secret_key):
+    return ContactRepo(conn, secret_key)

@@ -73,6 +73,22 @@ MIGRATIONS = [
     ALTER TABLE users ADD COLUMN briefing_time TEXT;
     ALTER TABLE users ADD COLUMN briefing_sent_on TEXT;
     """,
+    """
+    CREATE TABLE contacts (
+        id INTEGER PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        name TEXT NOT NULL,
+        email TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+    );
+    CREATE INDEX contacts_user_id ON contacts (user_id);
+    CREATE TABLE invite_counts (
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        day TEXT NOT NULL,
+        count INTEGER NOT NULL,
+        PRIMARY KEY (user_id, day)
+    );
+    """,
 ]
 
 
