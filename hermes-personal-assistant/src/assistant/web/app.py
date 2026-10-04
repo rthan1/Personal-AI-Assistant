@@ -77,12 +77,15 @@ Google Calendar, travel times, places nearby, and reminders. This page explains 
   minutes, reminder and daily briefing times).</li>
   <li>Your Google sign-in token, encrypted, so the assistant can reach your calendar.</li>
   <li>Notes you ask the assistant to remember, encrypted.</li>
+  <li>Contacts you ask it to save (a name and email, so you can invite people by name), encrypted, and a daily
+  count of invites you sent.</li>
   <li>Reminders you set: the event's id and times, not its title or details.</li>
   <li>Recent conversation history, so the assistant can follow the conversation.</li>
 </ul>
 <h2>Google Calendar data</h2>
 <p>The assistant reads your primary calendar only when you ask something that needs it (or to send reminders
-and briefings you turned on). It adds, changes, or deletes events only after you confirm in a message. Calendar
+and briefings you turned on). It adds, changes, or deletes events, or invites guests, only after you confirm in a
+message. When you invite someone, Google emails them the invitation, which includes the event's details. Calendar
 data isn't stored beyond what's listed above, and it is never sold, shared for advertising, or used to train
 AI models.</p>
 <p>The assistant's use and transfer of information received from Google APIs adheres to the
@@ -97,7 +100,8 @@ Policy</a>, including the Limited Use requirements.</p>
 </ul>
 <h2>Your choices</h2>
 <ul>
-  <li>Change your settings or turn off reminders and briefings by texting the assistant.</li>
+  <li>Change your settings, turn off reminders and briefings, or delete saved notes and contacts by texting the
+  assistant.</li>
   <li>Revoke calendar access anytime at
   <a href="https://myaccount.google.com/permissions">myaccount.google.com/permissions</a>.</li>
   <li>To delete your account and all data stored about you, contact {contact}.</li>

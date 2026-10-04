@@ -24,6 +24,12 @@ def _schema(name, description, properties=None, required=()):
 
 
 _DATE = {"type": "string", "description": "Local date, YYYY-MM-DD"}
+_GUESTS = {
+    "type": "array",
+    "items": {"type": "string"},
+    "description": "People to invite: email addresses, names saved with save_contact, or \"Name <email>\". "
+                   "Never guess an email.",
+}
 
 TOOLS = [
     _schema(
@@ -94,8 +100,9 @@ TOOLS = [
     _schema(
         "create_event",
         "Propose adding an event to the user's Google Calendar. Saves nothing: returns a pending_change_id to "
-        "confirm with confirm_change after the user says yes. Guests can't be added. Also returns any events it "
-        "overlaps (conflicts) and the nearest free slots of the same length (free_slots).",
+        "confirm with confirm_change after the user says yes. With guests, Google emails each guest an invitation "
+        "once confirmed. Also returns any events it overlaps (conflicts) and the nearest free slots of the same "
+        "length (free_slots).",
         {
             "title": {"type": "string"},
             "start": {"type": "string", "description": "Local YYYY-MM-DDTHH:MM, or YYYY-MM-DD when all_day"},
@@ -103,6 +110,7 @@ TOOLS = [
             "duration_minutes": {"type": "integer", "description": "Optional instead of end; default 60"},
             "all_day": {"type": "boolean", "description": "Optional; true for an all-day event"},
             "location": {"type": "string", "description": "Optional address or place"},
+            "guests": {**_GUESTS, "description": "Optional. " + _GUESTS["description"]},
         },
         required=("title", "start"),
     ),
@@ -128,10 +136,36 @@ TOOLS = [
         required=("event_id",),
     ),
     _schema(
+        "invite_guests",
+        "Propose inviting people to an existing event the user organizes (id from get_events). Saves nothing: "
+        "returns a pending_change_id to confirm with confirm_change after the user says yes; then Google emails "
+        "each new guest an invitation. People already invited are skipped.",
+        {"event_id": {"type": "string"}, "guests": _GUESTS},
+        required=("event_id", "guests"),
+    ),
+    _schema(
         "confirm_change",
         "Apply a proposed calendar change. Only call after the user replied yes to that exact change.",
-        {"change_id": {"type": "integer", "description": "pending_change_id from create/update/delete_event"}},
+        {"change_id": {"type": "integer",
+                       "description": "pending_change_id from create_event, update_event, delete_event, or "
+                                      "invite_guests"}},
         required=("change_id",),
+    ),
+    _schema(
+        "save_contact",
+        "Remember a person's email so the user can invite them by name later. Only when the user gives or confirms "
+        "the email. Saving the same name again replaces the email.",
+        {
+            "name": {"type": "string", "description": "How the user refers to them, e.g. \"Sam\" or \"Sam Lee\""},
+            "email": {"type": "string"},
+        },
+        required=("name", "email"),
+    ),
+    _schema(
+        "forget_contact",
+        "Delete a saved contact by name (names are in the account status note), or all of them with \"all\".",
+        {"name": {"type": "string"}},
+        required=("name",),
     ),
     _schema(
         "find_places",

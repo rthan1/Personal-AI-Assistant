@@ -58,6 +58,10 @@ def test_hook_fails_open_when_bridge_is_down(plugin, monkeypatch):
     ("set_preference", {"key": "default_reminder_minutes", "value": 15}),
     ("find_places", {"query": "ramen", "near": "Ann Arbor", "max_price": 2, "min_rating": 4.5, "open_now": True}),
     ("find_places", {"query": "bowling", "event_id": "abc", "min_rating": 4}),
+    ("create_event", {"title": "Dinner", "start": "2026-10-06T19:00", "guests": ["sam@x.com", "Alex"]}),
+    ("invite_guests", {"event_id": "abc", "guests": ["Sam Lee <sam@x.com>"]}),
+    ("save_contact", {"name": "Sam", "email": "sam@x.com"}),
+    ("forget_contact", {"name": "all"}),
 ])
 def test_schemas_accept_numbers_the_model_sends(plugin, tool, args):
     """Hermes validates arguments against these schemas and never turns numbers into strings."""
@@ -80,6 +84,7 @@ def test_register_adds_tools_and_hook(plugin):
     ctx = Ctx()
     plugin.register(ctx)
     assert ctx.tools == ["get_current_time", "get_events", "get_preferences", "set_preference", "plan_departure",
-                         "remember", "forget", "create_event", "update_event", "delete_event", "confirm_change", "find_places", "set_reminder", "list_reminders",
-                         "cancel_reminder"]
+                         "remember", "forget", "create_event", "update_event", "delete_event", "invite_guests",
+                         "confirm_change", "save_contact", "forget_contact", "find_places", "set_reminder",
+                         "list_reminders", "cancel_reminder"]
     assert ctx.hooks == ["pre_llm_call"]
