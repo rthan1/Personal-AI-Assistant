@@ -6,7 +6,7 @@ Last updated: 2026-10-04, ~3:00 AM ET. Read this plus `.cursor/rules/*.mdc` befo
 
 ## Status
 
-Everything below is built, tested (554 tests: `.\.venv\Scripts\python.exe -m pytest` from `hermes-personal-assistant`), and live. Guest invites and contacts are committed locally but not pushed yet.
+Everything below is built, tested (554 tests: `.\.venv\Scripts\python.exe -m pytest` from `hermes-personal-assistant`), live, and pushed.
 
 | Feature | Tools | Verified by texting the bot? |
 |---|---|---|
