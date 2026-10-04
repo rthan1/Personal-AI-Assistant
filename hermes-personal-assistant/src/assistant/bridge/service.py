@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 
 from googleapiclient.errors import HttpError
 
+from assistant.storage.contacts import Contact, ContactRepo
 from assistant.storage.memories import Memory, MemoryRepo
 from assistant.storage.pending_changes import PendingChangeRepo
 from assistant.storage.reminders import ReminderRepo
@@ -23,6 +24,8 @@ MAX_PLACE_RESULTS = 3
 MAX_CONFLICTS_SHOWN = 3
 MAX_CONFLICT_TITLE_LENGTH = 100
 MAX_PLACE_QUERY_LENGTH = 100
+MAX_INVITES_PER_DAY = 20
+MAX_CONTACTS_IN_CONTEXT = 40
 PLACE_SEARCH_RADIUS_M = {"walk": 3_000, "bicycle": 8_000, "transit": 8_000, "drive": 15_000}
 PRICE_SYMBOLS = {0: "free", 1: "$", 2: "$$", 3: "$$$", 4: "$$$$"}
 MEDIA_DIRECTIVE = re.compile(r"media\s*:", re.IGNORECASE)
@@ -46,8 +49,10 @@ class ToolService:
         pending_changes: PendingChangeRepo | None = None,
         places: places_service.PlaceSource | None = None,
         reminders: ReminderRepo | None = None,
+        contacts: ContactRepo | None = None,
     ):
         self._users = users
+        self._contacts = contacts
         self._public_base_url = public_base_url.rstrip("/")
         self._calendar_source_factory = calendar_source_factory
         self._now = now
@@ -67,7 +72,10 @@ class ToolService:
             "create_event": self.create_event,
             "update_event": self.update_event,
             "delete_event": self.delete_event,
+            "invite_guests": self.invite_guests,
             "confirm_change": self.confirm_change,
+            "save_contact": self.save_contact,
+            "forget_contact": self.forget_contact,
             "find_places": self.find_places,
             "set_reminder": self.set_reminder,
             "list_reminders": self.list_reminders,
@@ -117,6 +125,8 @@ class ToolService:
         ]
         if not user.google_connected:
             lines.append(f"- To connect their calendar, send this link exactly: {self._signup_link(user.phone)}")
+        if self._contacts is not None:
+            lines.append(_contacts_line(self._contacts.list(user.id)))
         if self._memories is not None:
             lines.extend(_memory_lines(self._memories.list(user.id)))
         return {"context": _defang("\n".join(lines))}
@@ -202,12 +212,19 @@ class ToolService:
         title = calendar_edits.clean_title(args.get("title"))
         location = calendar_edits.clean_location(args.get("location"))
         times = calendar_edits.new_event_times(args, tz)
+        guests = self._resolve_guests(user, args.get("guests"))
         self._credentials(user, write=True)
         body = {"summary": title, **calendar_edits.time_fields(times, tz)}
         if location:
             body["location"] = location
-        return self._propose(user, "create", {"body": body}, calendar_edits.describe(title, times, location, tz),
-                             self._overlaps(user, times, tz))
+        payload: dict[str, Any] = {"body": body}
+        summary = calendar_edits.describe(title, times, location, tz)
+        if guests:
+            self._check_invite_limit(user, len(guests))
+            body["attendees"] = [{"email": g.email} for g in guests]
+            payload.update(send_updates="all", invite_count=len(guests))
+            summary["guests"] = _guest_labels(guests)
+        return self._propose(user, "create", payload, summary, self._overlaps(user, times, tz))
 
     def update_event(self, user: User, args: dict) -> dict:
         tz = ZoneInfo(user.timezone)
@@ -236,6 +253,28 @@ class ToolService:
         event = self._event_to_change(user, args.get("event_id"), tz)
         return self._propose(user, "delete", {"event_id": event.id}, calendar_edits.describe_event(event, tz))
 
+    def invite_guests(self, user: User, args: dict) -> dict:
+        tz = ZoneInfo(user.timezone)
+        guests = self._resolve_guests(user, args.get("guests"))
+        if not guests:
+            raise ValueError("guests is required: email addresses or saved contact names.")
+        event = self._event_to_change(user, args.get("event_id"), tz)
+        if not event.is_organizer:
+            raise ToolError(f"{json.dumps(event.title)} was created by someone else, so only its organizer can invite "
+                            "people. The user can ask the organizer, or you can create a separate event.")
+        invited = {a.email.lower() for a in event.attendees}
+        new = [g for g in guests if g.email not in invited]
+        if not new:
+            raise ToolError(f"Everyone listed is already invited to {json.dumps(event.title)}.")
+        self._check_invite_limit(user, len(new))
+        summary: dict[str, Any] = {"event": calendar_edits.describe_event(event, tz), "inviting": _guest_labels(new)}
+        already = [g for g in guests if g.email in invited]
+        if already:
+            summary["already_invited"] = _guest_labels(already)
+        payload = {"event_id": event.id, "emails": [g.email for g in new], "send_updates": "all",
+                   "invite_count": len(new)}
+        return self._propose(user, "invite", payload, summary)
+
     def confirm_change(self, user: User, args: dict) -> dict:
         repo = self._pending_repo()
         change = repo.get(user.id, _parse_change_id(args.get("change_id")))
@@ -244,19 +283,31 @@ class ToolService:
         if change.turn >= repo.current_turn(user.id):
             raise ToolError("The user hasn't replied since this change was proposed. Show them the change and "
                             "wait for them to say yes before calling confirm_change.")
+        payload, tz = change.payload, ZoneInfo(user.timezone)
+        invite_count = payload.get("invite_count", 0)
+        if invite_count:
+            self._check_invite_limit(user, invite_count)
+        send_updates = payload.get("send_updates", "none")
         source = self._calendar_source(user, write=True)
         repo.delete(user.id, change.id)
-        payload, tz = change.payload, ZoneInfo(user.timezone)
         try:
             if change.action == "create":
-                raw = source.insert_event(payload["body"])
+                raw = source.insert_event(payload["body"], send_updates=send_updates)
             elif change.action == "update":
                 raw = source.patch_event(payload["event_id"], payload["body"])
+            elif change.action == "invite":
+                current = calendar_service.get_event(source, payload["event_id"], tz)
+                if current is None:
+                    raise ToolError("That event was cancelled, so nobody was invited.")
+                attendees = calendar_edits.merge_attendees(current.attendees, payload["emails"])
+                raw = source.patch_event(payload["event_id"], {"attendees": attendees}, send_updates=send_updates)
             else:
                 source.delete_event(payload["event_id"])
                 raw = None
         except HttpError as exc:
             raise _write_error(exc) from exc
+        if invite_count and self._contacts is not None:
+            self._contacts.record_invites(user.id, self._now().date(), invite_count)
         result = {"ok": True, "action": change.action, "change": payload["summary"]}
         event = calendar_service.parse_event(raw, tz) if raw else None
         if event is not None:
@@ -274,6 +325,9 @@ class ToolService:
         else:
             next_step = ("Nothing is saved yet. Tell the user exactly what will change and ask them to confirm. "
                          "Only after they reply yes, call confirm_change with this pending_change_id.")
+        if payload.get("invite_count"):
+            next_step += (" Once confirmed, Google emails an invitation to every guest listed, so show the user each "
+                          "guest's email address exactly as listed before they say yes.")
         return {
             "pending_change_id": change.id,
             "action": action,
@@ -322,6 +376,57 @@ class ToolService:
         if self._pending_changes is None:
             raise ToolError("Calendar editing isn't set up on this assistant yet.")
         return self._pending_changes
+
+    def _resolve_guests(self, user: User, value: Any) -> list[calendar_edits.GuestRequest]:
+        """Guests with an email each: names are looked up in the user's own contacts. Duplicates are dropped."""
+        resolved: list[calendar_edits.GuestRequest] = []
+        unknown: list[str] = []
+        seen: set[str] = set()
+        for guest in calendar_edits.parse_guests(value):
+            name, email = guest.name, guest.email
+            if email is None:
+                contact = self._contacts.get(user.id, name) if self._contacts is not None else None
+                if contact is None:
+                    unknown.append(name)
+                    continue
+                name, email = contact.name, contact.email
+            if email not in seen:
+                seen.add(email)
+                resolved.append(calendar_edits.GuestRequest(name, email))
+        if unknown:
+            raise ToolError(f"No saved email for {', '.join(json.dumps(n) for n in unknown)}. Ask the user for the "
+                            "email address (never guess one), then pass it in guests. You can offer to remember it "
+                            "with save_contact.")
+        return resolved
+
+    def _check_invite_limit(self, user: User, count: int) -> None:
+        if self._contacts is None:
+            return
+        sent = self._contacts.invites_sent(user.id, self._now().date())
+        if sent + count > MAX_INVITES_PER_DAY:
+            raise ToolError(f"That's more invites than allowed today ({MAX_INVITES_PER_DAY} per day, "
+                            f"{max(0, MAX_INVITES_PER_DAY - sent)} left). Try again tomorrow or invite fewer people.")
+
+    def save_contact(self, user: User, args: dict) -> dict:
+        name = calendar_edits.clean_guest_name(args.get("name"))
+        email = calendar_edits.clean_email(args.get("email"))
+        contact = self._contact_repo().save(user.id, name, email)
+        return {"ok": True, "name": contact.name, "email": contact.email}
+
+    def forget_contact(self, user: User, args: dict) -> dict:
+        repo = self._contact_repo()
+        name = args.get("name")
+        if str(name).strip().lower() == "all":
+            return {"ok": True, "deleted": repo.delete_all(user.id)}
+        cleaned = calendar_edits.clean_guest_name(name)
+        if not repo.delete(user.id, cleaned):
+            raise ToolError(f"No saved contact named {json.dumps(cleaned)}. Saved names are in the account status note.")
+        return {"ok": True, "deleted": 1, "name": cleaned}
+
+    def _contact_repo(self) -> ContactRepo:
+        if self._contacts is None:
+            raise ToolError("Contacts aren't set up on this assistant yet.")
+        return self._contacts
 
     def plan_departure(self, user: User, args: dict) -> dict:
         if self._travel_times is None:
@@ -573,6 +678,19 @@ def _memory_lines(memories: list[Memory]) -> list[str]:
         lines.append(line)
         used += len(line) + 1
     return lines
+
+
+def _contacts_line(contacts: list[Contact]) -> str:
+    """Names only: emails stay out of the context and are shown in invite proposals instead."""
+    if not contacts:
+        return "- saved contacts: none"
+    names = ", ".join(json.dumps(c.name) for c in contacts[:MAX_CONTACTS_IN_CONTEXT])
+    more = len(contacts) - MAX_CONTACTS_IN_CONTEXT
+    return f"- saved contacts (invite by name): {names}" + (f", and {more} more" if more > 0 else "")
+
+
+def _guest_labels(guests: list[calendar_edits.GuestRequest]) -> list[str]:
+    return [f"{g.name} ({g.email})" if g.name else g.email for g in guests]
 
 
 def _parse_positive_id(value: Any, error: str) -> int:

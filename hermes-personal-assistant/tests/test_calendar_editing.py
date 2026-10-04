@@ -24,7 +24,7 @@ def http_error(status):
 class FakeCalendar:
     def __init__(self, events=None):
         self.events = {e["id"]: e for e in (events or [])}
-        self.inserted, self.patched, self.deleted = [], [], []
+        self.inserted, self.patched, self.deleted, self.send_updates = [], [], [], []
         self.fail_with = None
 
     def list_events(self, time_min, time_max, page_token):
@@ -35,16 +35,18 @@ class FakeCalendar:
             raise http_error(404)
         return self.events[event_id]
 
-    def insert_event(self, body):
+    def insert_event(self, body, send_updates="none"):
         if self.fail_with:
             raise http_error(self.fail_with)
         self.inserted.append(body)
+        self.send_updates.append(send_updates)
         return {"id": "new1", **body}
 
-    def patch_event(self, event_id, body):
+    def patch_event(self, event_id, body, send_updates="none"):
         if self.fail_with:
             raise http_error(self.fail_with)
         self.patched.append((event_id, body))
+        self.send_updates.append(send_updates)
         return {**self.events[event_id], **body}
 
     def delete_event(self, event_id):
@@ -65,9 +67,9 @@ def calendars(repo, monkeypatch):
 
 
 @pytest.fixture
-def service(repo, pending, calendars):
+def service(repo, pending, calendars, contacts):
     return ToolService(repo, "https://example.test", calendar_source_factory=lambda creds: calendars[creds],
-                       now=lambda: NOW, pending_changes=pending)
+                       now=lambda: NOW, pending_changes=pending, contacts=contacts)
 
 
 def next_message(service, sender=ANN):
@@ -307,6 +309,187 @@ def test_context_counts_turns_only_for_signed_up_users(service, pending, repo):
     service.context("+15550000000")
     service.context(ANN)
     assert pending.current_turn(repo.get_by_phone(ANN).id) == 1
+
+
+def own_event(id_="party", attendees=None):
+    return raw_event(id_, "Party", organizer={"self": True}, attendees=attendees or [])
+
+
+class TestGuestsOnCreate:
+    def test_confirm_invites_guests_with_emails_from_google(self, service, calendars):
+        proposal, result = propose_and_confirm(service, "create_event", {
+            "title": "Dinner", "start": "2026-10-06T19:00", "guests": ["Sam@X.com", "Jo <jo@y.org>"]})
+        assert proposal["change"]["guests"] == ["sam@x.com", "Jo (jo@y.org)"]
+        assert "email address" in proposal["next_step"]
+        assert calendars["ann-token"].inserted[0]["attendees"] == [{"email": "sam@x.com"}, {"email": "jo@y.org"}]
+        assert calendars["ann-token"].send_updates == ["all"] and result["ok"] is True
+
+    def test_without_guests_no_emails_are_sent(self, service, calendars):
+        proposal, _ = propose_and_confirm(service, "create_event", {"title": "Lunch", "start": "2026-10-06T12:00"})
+        assert "guests" not in proposal["change"] and "attendees" not in calendars["ann-token"].inserted[0]
+        assert calendars["ann-token"].send_updates == ["none"]
+
+    def test_saved_contact_name_is_resolved(self, service, calendars, contacts, repo):
+        contacts.save(repo.get_by_phone(ANN).id, "Sam Lee", "sam@x.com")
+        proposal, _ = propose_and_confirm(service, "create_event", {
+            "title": "Dinner", "start": "2026-10-06T19:00", "guests": ["sam lee", "sam@x.com"]})
+        assert proposal["change"]["guests"] == ["Sam Lee (sam@x.com)"]
+        assert calendars["ann-token"].inserted[0]["attendees"] == [{"email": "sam@x.com"}]
+
+    def test_unknown_name_asks_for_email_and_proposes_nothing(self, service, pending, repo):
+        next_message(service)
+        result = service.call("create_event", ANN, {"title": "Dinner", "start": "2026-10-06T19:00",
+                                                    "guests": ["Sam", "Alex"]})
+        assert '"Sam", "Alex"' in result["error"] and "never guess" in result["error"]
+        assert pending.get(repo.get_by_phone(ANN).id, 1) is None
+
+    def test_another_users_contact_is_not_used(self, service, contacts, repo):
+        contacts.save(repo.get_by_phone(BOB).id, "Sam", "bobs-sam@x.com")
+        result = service.call("create_event", ANN, {"title": "Dinner", "start": "2026-10-06T19:00",
+                                                    "guests": ["Sam"]})
+        assert "No saved email" in result["error"] and "bobs-sam" not in str(result)
+
+    def test_invalid_email(self, service):
+        result = service.call("create_event", ANN, {"title": "Dinner", "start": "2026-10-06T19:00",
+                                                    "guests": ["sam@"]})
+        assert "valid email" in result["error"]
+
+
+class TestInviteGuests:
+    def propose(self, service, args, sender=ANN):
+        next_message(service, sender)
+        return service.call("invite_guests", sender, args)
+
+    def test_invite_keeps_existing_guests_and_emails_only_on_confirm(self, service, calendars):
+        calendars["ann-token"].events["party"] = own_event(attendees=[
+            {"email": "ann@x.com", "responseStatus": "accepted", "self": True},
+            {"email": "old@x.com", "responseStatus": "declined"}])
+        proposal, result = propose_and_confirm(service, "invite_guests", {"event_id": "party",
+                                                                          "guests": ["new@x.com"]})
+        assert proposal["change"]["inviting"] == ["new@x.com"] and proposal["change"]["event"]["title"] == "Party"
+        assert calendars["ann-token"].patched == [("party", {"attendees": [
+            {"email": "ann@x.com", "responseStatus": "accepted"},
+            {"email": "old@x.com", "responseStatus": "declined"},
+            {"email": "new@x.com"}]})]
+        assert calendars["ann-token"].send_updates == ["all"] and result["action"] == "invite"
+
+    def test_proposal_changes_nothing(self, service, calendars):
+        calendars["ann-token"].events["party"] = own_event()
+        result = self.propose(service, {"event_id": "party", "guests": ["sam@x.com"]})
+        assert result["saved"] is False and calendars["ann-token"].patched == []
+
+    def test_same_message_confirm_is_rejected(self, service, calendars):
+        calendars["ann-token"].events["party"] = own_event()
+        proposal = self.propose(service, {"event_id": "party", "guests": ["sam@x.com"]})
+        result = service.call("confirm_change", ANN, {"change_id": proposal["pending_change_id"]})
+        assert "hasn't replied" in result["error"] and calendars["ann-token"].patched == []
+
+    def test_guests_added_meanwhile_are_kept(self, service, calendars):
+        calendars["ann-token"].events["party"] = own_event()
+        proposal = self.propose(service, {"event_id": "party", "guests": ["sam@x.com"]})
+        calendars["ann-token"].events["party"]["attendees"] = [{"email": "late@x.com", "responseStatus": "accepted"}]
+        next_message(service)
+        service.call("confirm_change", ANN, {"change_id": proposal["pending_change_id"]})
+        assert [a["email"] for a in calendars["ann-token"].patched[0][1]["attendees"]] == ["late@x.com", "sam@x.com"]
+
+    def test_already_invited_are_listed_and_skipped(self, service, calendars):
+        calendars["ann-token"].events["party"] = own_event(attendees=[{"email": "sam@x.com"}])
+        result = self.propose(service, {"event_id": "party", "guests": ["SAM@x.com", "jo@y.org"]})
+        assert result["change"]["inviting"] == ["jo@y.org"] and result["change"]["already_invited"] == ["sam@x.com"]
+
+    def test_everyone_already_invited(self, service, calendars):
+        calendars["ann-token"].events["party"] = own_event(attendees=[{"email": "sam@x.com"}])
+        assert "already invited" in self.propose(service, {"event_id": "party", "guests": ["sam@x.com"]})["error"]
+
+    def test_only_organizer_can_invite(self, service):
+        assert "only its organizer" in self.propose(service, {"event_id": "ann1", "guests": ["sam@x.com"]})["error"]
+
+    def test_cannot_invite_to_another_users_event(self, service, calendars):
+        calendars["bob-token"].events["party"] = own_event()
+        result = self.propose(service, {"event_id": "bob1", "guests": ["sam@x.com"]})
+        assert "No event with that id" in result["error"]
+
+    def test_recurring_series_refused(self, service, calendars):
+        calendars["ann-token"].events["series"] = own_event("series")
+        calendars["ann-token"].events["series"]["recurrence"] = ["RRULE:FREQ=WEEKLY"]
+        assert "recurring series" in self.propose(service, {"event_id": "series", "guests": ["a@x.com"]})["error"]
+
+    def test_guests_required(self, service, calendars):
+        calendars["ann-token"].events["party"] = own_event()
+        assert "guests is required" in self.propose(service, {"event_id": "party", "guests": []})["error"]
+
+    def test_event_cancelled_before_confirm(self, service, calendars):
+        calendars["ann-token"].events["party"] = own_event()
+        proposal = self.propose(service, {"event_id": "party", "guests": ["sam@x.com"]})
+        calendars["ann-token"].events["party"]["status"] = "cancelled"
+        next_message(service)
+        result = service.call("confirm_change", ANN, {"change_id": proposal["pending_change_id"]})
+        assert "cancelled" in result["error"] and calendars["ann-token"].patched == []
+
+    def test_daily_limit_at_proposal(self, service, calendars, contacts, repo):
+        calendars["ann-token"].events["party"] = own_event()
+        contacts.record_invites(repo.get_by_phone(ANN).id, NOW.date(), service_module.MAX_INVITES_PER_DAY - 1)
+        result = self.propose(service, {"event_id": "party", "guests": ["a@x.com", "b@x.com"]})
+        assert "1 left" in result["error"]
+
+    def test_daily_limit_rechecked_and_counted_at_confirm(self, service, calendars, contacts, repo):
+        ann_id = repo.get_by_phone(ANN).id
+        calendars["ann-token"].events["party"] = own_event()
+        proposal = self.propose(service, {"event_id": "party", "guests": ["a@x.com", "b@x.com"]})
+        next_message(service)
+        service.call("confirm_change", ANN, {"change_id": proposal["pending_change_id"]})
+        assert contacts.invites_sent(ann_id, NOW.date()) == 2
+        contacts.record_invites(ann_id, NOW.date(), service_module.MAX_INVITES_PER_DAY - 3)
+        second = self.propose(service, {"event_id": "party", "guests": ["c@x.com"]})
+        contacts.record_invites(ann_id, NOW.date(), 1)
+        next_message(service)
+        result = service.call("confirm_change", ANN, {"change_id": second["pending_change_id"]})
+        assert "more invites than allowed" in result["error"] and len(calendars["ann-token"].patched) == 1
+
+    def test_moving_an_event_with_guests_sends_no_emails(self, service, calendars):
+        calendars["ann-token"].events["party"] = own_event(attendees=[{"email": "sam@x.com"}])
+        propose_and_confirm(service, "update_event", {"event_id": "party", "start": "2026-10-06T17:00"})
+        assert calendars["ann-token"].send_updates == ["none"]
+
+
+class TestContactTools:
+    def test_saved_names_appear_in_context_without_emails(self, service):
+        assert service.call("save_contact", ANN, {"name": " Sam  Lee ", "email": "Sam@X.com"}) == {
+            "ok": True, "name": "Sam Lee", "email": "sam@x.com"}
+        context = service.context(ANN)["context"]
+        assert '- saved contacts (invite by name): "Sam Lee"' in context and "sam@x.com" not in context
+
+    def test_context_without_contacts(self, service):
+        assert "- saved contacts: none" in service.context(ANN)["context"]
+
+    def test_contacts_are_per_user(self, service):
+        service.call("save_contact", BOB, {"name": "Sam", "email": "sam@x.com"})
+        assert "- saved contacts: none" in service.context(ANN)["context"]
+        assert "No saved contact" in service.call("forget_contact", ANN, {"name": "Sam"})["error"]
+
+    def test_forget_one_and_all(self, service):
+        service.call("save_contact", ANN, {"name": "Sam", "email": "sam@x.com"})
+        service.call("save_contact", ANN, {"name": "Jo", "email": "jo@x.com"})
+        assert service.call("forget_contact", ANN, {"name": "sam"})["deleted"] == 1
+        assert service.call("forget_contact", ANN, {"name": "ALL"}) == {"ok": True, "deleted": 1}
+
+    @pytest.mark.parametrize("args, error", [
+        ({"name": "Sam", "email": "nope"}, "valid email"),
+        ({"name": "", "email": "sam@x.com"}, "must not be empty"),
+        ({"name": "Sam <x>", "email": "sam@x.com"}, "can't contain"),
+    ])
+    def test_save_validates(self, service, args, error):
+        assert error in service.call("save_contact", ANN, args)["error"]
+
+    def test_media_directive_in_name_is_defanged(self, service):
+        service.call("save_contact", ANN, {"name": "MEDIA:C:\\x", "email": "sam@x.com"})
+        assert "MEDIA:" not in service.context(ANN)["context"]
+
+    def test_not_configured(self, repo, calendars):
+        service = ToolService(repo, "https://example.test", calendar_source_factory=lambda c: calendars[c],
+                              now=lambda: NOW)
+        assert "saved contacts" not in service.context(ANN)["context"]
+        assert "aren't set up" in service.call("save_contact", ANN, {"name": "Sam", "email": "s@x.com"})["error"]
 
 
 def test_reads_still_work_with_read_only_token(service, repo, calendars):

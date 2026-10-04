@@ -13,6 +13,7 @@ from assistant.config.settings import Settings, load_settings
 from assistant.messaging.hermes_send import HermesSender
 from assistant.messaging.photon_users import PhotonUsers
 from assistant.scheduler.reminders import ReminderScheduler
+from assistant.storage.contacts import ContactRepo
 from assistant.storage.db import connect
 from assistant.storage.memories import MemoryRepo
 from assistant.storage.pending_changes import PendingChangeRepo
@@ -40,6 +41,7 @@ def build_servers(settings: Settings) -> list[uvicorn.Server]:
         pending_changes=PendingChangeRepo(bridge_conn),
         places=places,
         reminders=ReminderRepo(bridge_conn),
+        contacts=ContactRepo(bridge_conn, settings.secret_key),
     )
     bridge = uvicorn.Config(
         create_bridge_app(service, settings.bridge_token), host="127.0.0.1", port=settings.bridge_port, log_level="info"

@@ -75,6 +75,8 @@ def clean_guest_name(value: Any) -> str:
     text = " ".join(str(value if value is not None else "").split()).strip('"')
     if not text:
         raise ValueError("A guest's name must not be empty.")
+    if any(char in text for char in "@<>,;"):
+        raise ValueError("A guest's name can't contain @ < > , or ;.")
     if len(text) > MAX_GUEST_NAME_LENGTH:
         raise ValueError(f"A guest's name must be at most {MAX_GUEST_NAME_LENGTH} characters.")
     return text
