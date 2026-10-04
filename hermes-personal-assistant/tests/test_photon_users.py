@@ -8,7 +8,7 @@ from assistant.messaging.photon_users import PhotonError, PhotonUsers
 
 
 class FakeSpectrum:
-    def __init__(self, users=None, assign_on_create="+16460000000", fail=False):
+    def __init__(self, users=None, assign_on_create="+15550199999", fail=False):
         self.users = list(users or [])
         self.assign_on_create = assign_on_create
         self.fail = fail
@@ -31,14 +31,14 @@ def make(fake):
 
 
 def test_existing_user_is_not_recreated():
-    fake = FakeSpectrum(users=[{"phoneNumber": "+15551234567", "assignedPhoneNumber": "+16465792852"}])
-    assert make(fake).register("+15551234567") == "+16465792852"
+    fake = FakeSpectrum(users=[{"phoneNumber": "+15551234567", "assignedPhoneNumber": "+15550100000"}])
+    assert make(fake).register("+15551234567") == "+15550100000"
     assert [r.method for r in fake.requests] == ["GET"]
 
 
 def test_new_user_is_created_then_assigned_number_looked_up():
     fake = FakeSpectrum()
-    assert make(fake).register("+15551234567") == "+16460000000"
+    assert make(fake).register("+15551234567") == "+15550199999"
     assert [r.method for r in fake.requests] == ["GET", "POST", "GET"]
     assert json.loads(fake.requests[1].content) == {"type": "shared", "phoneNumber": "+15551234567"}
 

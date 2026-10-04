@@ -58,7 +58,7 @@ def load_settings() -> Settings:
         secret_key=os.environ["ASSISTANT_SECRET_KEY"],
         bridge_token=os.environ["BRIDGE_TOKEN"],
         public_base_url=os.getenv("PUBLIC_BASE_URL", "http://localhost:8787").rstrip("/"),
-        bot_phone=os.getenv("BOT_PHONE", "+1 646-579-2852"),
+        bot_phone=os.environ["BOT_PHONE"],
         web_port=int(os.getenv("WEB_PORT", "8787")),
         bridge_port=int(os.getenv("BRIDGE_PORT", "8788")),
         photon_project_id=photon_project_id,

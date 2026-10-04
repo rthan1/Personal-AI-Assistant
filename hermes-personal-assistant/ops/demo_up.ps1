@@ -1,7 +1,13 @@
 # Starts Hermes, the assistant app and ngrok (if not already running), then checks
 # that each one responds. Run this before the demo.
 
-$publicUrl = "https://detached-tasty-pronto.ngrok-free.dev/"
+$envLine = Get-Content (Join-Path (Split-Path -Parent $PSScriptRoot) ".env") -ErrorAction SilentlyContinue |
+    Where-Object { $_ -match '^\s*PUBLIC_BASE_URL\s*=' } | Select-Object -First 1
+if (-not $envLine) {
+    Write-Host "PUBLIC_BASE_URL is not set in .env" -ForegroundColor Red
+    exit 1
+}
+$publicUrl = ($envLine -split '=', 2)[1].Trim().Trim('"', "'").TrimEnd("/") + "/"
 
 foreach ($name in "Hermes_Gateway", "Assistant_App", "Assistant_Ngrok") {
     if (-not (Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue)) {

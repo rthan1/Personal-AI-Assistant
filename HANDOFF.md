@@ -28,7 +28,7 @@ Everything runs as Windows scheduled tasks that start at logon (30 s delay), run
 |---|---|---|
 | `Hermes_Gateway` | Hermes (installed by Hermes) | `%LOCALAPPDATA%\hermes\logs\` |
 | `Assistant_App` | `ops/run_assistant.ps1`: loops `python -m assistant.run`, restarting 10 s after any exit | `data/logs/assistant.log` |
-| `Assistant_Ngrok` | `ops/run_ngrok.ps1`: loops `ngrok http --domain=detached-tasty-pronto.ngrok-free.dev 8787` | `data/logs/ngrok.log` |
+| `Assistant_Ngrok` | `ops/run_ngrok.ps1`: loops `ngrok http --domain=<your-ngrok-domain> 8787` | `data/logs/ngrok.log` |
 
 Scripts in `hermes-personal-assistant/ops/` (run with `powershell -ExecutionPolicy Bypass -File <script>`):
 - `demo_up.ps1`: starts all three tasks, then checks Hermes, `:8788/health`, `:8787/`, and the public URL. **Run before the demo.**
@@ -48,13 +48,13 @@ iPhone ⇄ Photon (Spectrum, shared pool) ⇄ Hermes gateway (local, scheduled t
    our app: python -m assistant.run → bridge API 127.0.0.1:8788 + sign-up site 127.0.0.1:8787
                     ▼
    SQLite data/assistant.db + Google Calendar API
-Browser → ngrok (detached-tasty-pronto.ngrok-free.dev) → :8787 → Google OAuth
+Browser → ngrok (<your-ngrok-domain>) → :8787 → Google OAuth
 ```
 
 ### Sign-up flow (security-relevant, don't weaken)
 
 1. `/` asks for a phone number → `POST /start` registers it as a **Photon project user** (`messaging/photon_users.py`, idempotent, rate-limited to 30/hour) → shows "Text <assignedPhoneNumber>".
-   - On the Pro plan (shared pool), Photon **only routes senders registered as project users**, and each user is assigned a pool number that may differ from +1 646-579-2852.
+   - On the Pro plan (shared pool), Photon **only routes senders registered as project users**, and each user is assigned a pool number that may differ from the default bot line (BOT_PHONE).
    - Registering grants nothing except the ability to text the bot.
 2. The person texts the bot. The plugin's `pre_llm_call` hook calls `/context`, which says "NOT signed up" and includes a personal link `/signup?t=<token>`. The model relays it.
    - The token (table `signup_tokens`) is tied to the **trusted iMessage sender**, valid for 1 hour, and deleted once Google is connected.
@@ -99,17 +99,18 @@ Browser → ngrok (detached-tasty-pronto.ngrok-free.dev) → :8787 → Google OA
 |---|---|
 | `ASSISTANT_SECRET_KEY` | Fernet key for Google tokens. **Changing it makes every stored token unreadable.** Required. |
 | `BRIDGE_TOKEN` | Must equal `ASSISTANT_BRIDGE_TOKEN` in Hermes's `.env`. Required. |
-| `PUBLIC_BASE_URL` | `https://detached-tasty-pronto.ngrok-free.dev` |
+| `PUBLIC_BASE_URL` | `https://<your-ngrok-domain>`. `ops/run_ngrok.ps1` and `ops/demo_up.ps1` read the ngrok domain from here. |
+| `BOT_PHONE` | The bot's iMessage line, shown on the sign-up page if Photon assigns none. Required. |
 | `GOOGLE_MAPS_API_KEY` | For the Routes API (step 2). |
-| optional | `ASSISTANT_TIMEZONE`, `BOT_PHONE` (fallback number shown if Photon assigns none), `WEB_PORT` 8787, `BRIDGE_PORT` 8788, `ASSISTANT_DB_PATH` |
+| optional | `ASSISTANT_TIMEZONE`, `WEB_PORT` 8787, `BRIDGE_PORT` 8788, `ASSISTANT_DB_PATH` |
 
 `data/` (gitignored): `assistant.db`, `web_client.json` (Google **Web** OAuth client, which the site uses), and `credentials.json` (old Desktop client, now unused unless a token still references it).
 
 ## External setup
 
-- **Google Cloud:** one project with the Calendar and Routes APIs enabled. The Web client's redirect URI is `https://detached-tasty-pronto.ngrok-free.dev/oauth/google/callback`. An unverified app shows a warning screen (users click Advanced, then Go to…) and is capped at 100 users.
-- **ngrok:** free static domain `detached-tasty-pronto.ngrok-free.dev`. Tunnel **only port 8787, never 8788.** Visitors see an ngrok interstitial page once.
-- **Photon:** Spectrum **Pro**, shared pool. Ethan's number is in `PHOTON_ALLOWED_USERS` in Hermes's `.env`; his assigned line is `+16465792852`. Limits: 50 new conversations per line per day, 5,000 messages per day. Shared lines can't text first. Groups aren't supported.
+- **Google Cloud:** one project with the Calendar and Routes APIs enabled. The Web client's redirect URI is `https://<your-ngrok-domain>/oauth/google/callback`. An unverified app shows a warning screen (users click Advanced, then Go to…) and is capped at 100 users.
+- **ngrok:** free static domain `<your-ngrok-domain>`. Tunnel **only port 8787, never 8788.** Visitors see an ngrok interstitial page once.
+- **Photon:** Spectrum **Pro**, shared pool. Ethan's number is in `PHOTON_ALLOWED_USERS` in Hermes's `.env`; his assigned line is in `BOT_PHONE` in the project `.env`. Limits: 50 new conversations per line per day, 5,000 messages per day. Shared lines can't text first. Groups aren't supported.
 
 ## Hermes (native install, not in this repo)
 

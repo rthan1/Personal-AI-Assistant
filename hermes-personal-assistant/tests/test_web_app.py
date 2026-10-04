@@ -33,7 +33,7 @@ def google():
 
 @pytest.fixture
 def client(repo, google):
-    app = create_web_app(repo, BASE_URL, "+1 646-579-2852", "America/New_York", google.start, google.finish)
+    app = create_web_app(repo, BASE_URL, "+1 555-010-0000", "America/New_York", google.start, google.finish)
     return TestClient(app, follow_redirects=False)
 
 
@@ -48,11 +48,11 @@ def state_from(response):
 def test_home_page_links_to_bot(client):
     response = client.get("/")
     assert response.status_code == 200
-    assert "sms:+16465792852" in response.text
+    assert "sms:+15550100000" in response.text
 
 
 class FakePhoton:
-    def __init__(self, number="+16460000000", fail=False):
+    def __init__(self, number="+15550199999", fail=False):
         self.number, self.fail, self.registered = number, fail, []
 
     def register(self, phone):
@@ -63,7 +63,7 @@ class FakePhoton:
 
 
 def registering_client(repo, google, photon, limiter=None):
-    app = create_web_app(repo, BASE_URL, "+1 646-579-2852", "America/New_York", google.start, google.finish,
+    app = create_web_app(repo, BASE_URL, "+1 555-010-0000", "America/New_York", google.start, google.finish,
                          register_phone=photon.register, registration_limiter=limiter)
     return TestClient(app, follow_redirects=False)
 
@@ -74,11 +74,11 @@ def test_home_page_asks_for_phone_when_registration_enabled(repo, google):
 
 
 def test_start_registers_number_and_shows_assigned_line(repo, google):
-    photon = FakePhoton(number="+16460000000")
+    photon = FakePhoton(number="+15550199999")
     response = registering_client(repo, google, photon).post("/start", data={"phone": "(555) 123-4567"})
     assert response.status_code == 200
     assert photon.registered == ["+15551234567"]
-    assert "sms:+16460000000" in response.text
+    assert "sms:+15550199999" in response.text
 
 
 def test_start_does_not_create_an_account(repo, google):
@@ -88,7 +88,7 @@ def test_start_does_not_create_an_account(repo, google):
 
 def test_start_falls_back_to_bot_phone_when_no_line_assigned(repo, google):
     response = registering_client(repo, google, FakePhoton(number=None)).post("/start", data={"phone": "+15551234567"})
-    assert "sms:+16465792852" in response.text
+    assert "sms:+15550100000" in response.text
 
 
 def test_start_rejects_bad_phone(repo, google):
