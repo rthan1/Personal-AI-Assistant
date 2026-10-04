@@ -19,6 +19,9 @@ __pycache__/
 # Credentials / tokens
 token.json
 
+# Runtime data (database, Google credentials)
+data/
+
 # IDE files
 .idea/
 .vscode/

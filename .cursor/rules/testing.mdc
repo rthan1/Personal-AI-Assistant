@@ -1,0 +1,33 @@
+---
+description: Testing conventions
+globs: **/test_*.py, **/*_test.py, **/tests/**
+alwaysApply: false
+---
+
+# Testing
+
+## Setup
+
+- Use `pytest`. Tests live in `tests/`, mirroring the source layout (e.g. `tests/tools/test_departure_planner.py`).
+- Shared fixtures (fake events, fake clients, temp database) go in `tests/conftest.py`.
+
+## Rules
+
+- No real network calls. Mock Google Calendar, Google Routes, Photon, and Hermes model calls.
+- Use an in-memory or temporary SQLite database; never touch the real one.
+- Use fixed, timezone-aware datetimes in tests; never depend on the current time. Freeze time (e.g. `freezegun`) for scheduler tests.
+- One behavior per test; name tests after the behavior: `test_leave_time_includes_buffer`.
+
+## What to test
+
+- **departure_planner**: pure time math, the highest priority. Cover buffers, events with no location, and timezone edges.
+- **reminders**: create, list, cancel; the dispatcher skips cancelled or moved events and marks reminders sent.
+- **scheduler**: daily briefing builds the right summary for a given day's events.
+- **API wrappers**: correct request parameters and graceful handling of API errors.
+
+```python
+def test_leave_time_includes_buffer():
+    start = datetime(2026, 10, 3, 18, 0, tzinfo=timezone.utc)
+    leave = plan_leave_time(start, travel=timedelta(minutes=25), buffer=timedelta(minutes=10))
+    assert leave == datetime(2026, 10, 3, 17, 25, tzinfo=timezone.utc)
+```

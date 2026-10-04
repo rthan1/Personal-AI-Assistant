@@ -1,0 +1,19 @@
+
+This is a Python project.
+
+Before making architectural changes:
+- inspect the existing architecture
+- preserve existing public APIs unless explicitly asked otherwise
+- prefer small, testable changes
+- run the relevant tests after modifications
+
+Do not:
+- delete tests to make them pass
+- introduce dependencies without justification
+- rewrite large sections of the project unnecessarily
+
+When modifying code:
+1. Understand the existing implementation.
+2. Make the smallest reasonable change.
+3. Run tests.
+4. Report what changed and what was tested.

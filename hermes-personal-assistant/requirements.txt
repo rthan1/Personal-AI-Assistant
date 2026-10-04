@@ -1,0 +1,10 @@
+pytest>=8.0
+python-dotenv>=1.0
+tzdata
+google-api-python-client>=2.0
+google-auth-oauthlib>=1.0
+cryptography>=42
+fastapi>=0.110
+uvicorn[standard]>=0.30
+python-multipart>=0.0.9
+httpx>=0.27

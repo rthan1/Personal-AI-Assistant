@@ -1,0 +1,44 @@
+---
+description: Python coding standards
+globs: **/*.py
+alwaysApply: false
+---
+
+# Python Standards
+
+## Environment
+
+- Python 3.11+, run inside the project `.venv`.
+- Add dependencies to `requirements.txt` / `pyproject.toml` when introducing them.
+- Secrets (Google OAuth client, Maps API key, Photon credentials) come from `.env` via `config/`. Never hardcode or log them.
+
+## Style
+
+- Type hints on all function signatures; follow PEP 8 naming.
+- Prefer small, single-purpose functions. Keep logic in `tools/` pure where possible (inputs in, result out, no I/O).
+- Use `dataclass` (or Pydantic) for structured data like events, routes, and reminders instead of raw dicts.
+- Use `logging`, not `print`.
+
+## Dates and times
+
+- Always use timezone-aware datetimes (`zoneinfo.ZoneInfo`); never naive `datetime.now()`.
+- Store and compare in UTC; convert to local time only for user-facing text.
+
+```python
+# BAD
+now = datetime.now()
+
+# GOOD
+now = datetime.now(timezone.utc)
+```
+
+## External APIs
+
+- Each external service (Google Calendar, Google Routes, Photon) is wrapped in its own module in `tools/` or `messaging/`; other code calls the wrapper, not the SDK directly.
+- Handle API failures explicitly: catch specific exceptions, log context, and return a clear error the agent can relay to the user.
+- Pass clients in as parameters (dependency injection) so they can be mocked in tests.
+
+```python
+def get_travel_time(client: RoutesClient, origin: str, destination: str, arrive_by: datetime) -> timedelta:
+    ...
+```
