@@ -81,6 +81,11 @@ def test_start_registers_number_and_shows_assigned_line(repo, google):
     assert "sms:+15550199999" in response.text
 
 
+def test_opening_start_directly_redirects_home(repo, google):
+    response = registering_client(repo, google, FakePhoton()).get("/start")
+    assert response.status_code == 303 and response.headers["location"] == "/"
+
+
 def test_start_does_not_create_an_account(repo, google):
     registering_client(repo, google, FakePhoton()).post("/start", data={"phone": "+15551234567"})
     assert repo.get_by_phone("+15551234567") is None
@@ -139,6 +144,29 @@ def test_submit_creates_user_for_token_phone_and_redirects_to_google(repo, clien
     assert response.headers["location"].startswith("https://accounts.google.test/auth")
     user = repo.get_by_phone("+15551234567")
     assert (user.name, user.timezone, user.home_address, user.travel_mode) == ("Ann", "America/Chicago", "1 Main St", "transit")
+
+
+def test_briefing_is_off_unless_chosen_on_the_form(repo, client):
+    submit(client, repo.create_signup_token("+15551234567"))
+    assert repo.get_by_phone("+15551234567").briefing_time is None
+
+
+def test_submit_saves_chosen_briefing_time(repo, client):
+    response = submit(client, repo.create_signup_token("+15551234567"), briefing_time="07:30")
+    assert response.status_code == 303
+    assert repo.get_by_phone("+15551234567").briefing_time == "07:30"
+
+
+def test_submit_rejects_bad_briefing_time(repo, client):
+    response = submit(client, repo.create_signup_token("+15551234567"), briefing_time="25:00")
+    assert response.status_code == 400 and "briefing_time" in response.text
+    assert repo.get_by_phone("+15551234567") is None
+
+
+def test_settings_form_shows_saved_briefing_time(repo, client):
+    repo.upsert("+15551234567", "America/New_York", name="Ann", briefing_time="07:30")
+    response = client.get(f"/signup?t={repo.create_signup_token('+15551234567')}")
+    assert 'name="briefing_time" type="time" value="07:30"' in response.text
 
 
 def test_submit_with_bad_token_creates_nothing(repo, client):

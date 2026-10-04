@@ -142,9 +142,13 @@ def create_web_app(
   <label>Home address <span class="hint">(optional, for "when should I leave?")</span>
     <input name="home_address" maxlength="{preferences.MAX_ADDRESS_LENGTH}" value="{value('home_address')}"></label>
   <label>How do you usually get around?<select name="travel_mode">{modes}</select></label>
+  <label>Daily briefing <span class="hint">(optional: a text with that day's events at this time; you can
+    change or stop it anytime by texting the assistant)</span>
+    <input name="briefing_time" type="time" value="{value('briefing_time')}"></label>
   <button class="btn" type="submit">Continue to Google Calendar</button>
 </form>
-<p class="hint">The assistant only gets read-only access to your primary calendar.</p>
+<p class="hint">The assistant can see and edit events on your primary calendar. It always asks you before
+  adding, changing, or deleting anything.</p>
 <script>
   var tz = document.getElementById("tz");
   if (!tz.value) {{ tz.value = Intl.DateTimeFormat().resolvedOptions().timeZone || "{escape(default_timezone)}"; }}
@@ -154,6 +158,11 @@ def create_web_app(
     @app.get("/", response_class=HTMLResponse)
     def home() -> HTMLResponse:
         return landing()
+
+    @app.get("/start")
+    def start_page() -> RedirectResponse:
+        """Refreshing or sharing the "text this number" page lands here; send them back to the phone form."""
+        return RedirectResponse("/", status_code=303)
 
     @app.post("/start", response_class=HTMLResponse)
     def start(phone: str = Form(default="")) -> HTMLResponse:
@@ -196,8 +205,10 @@ def create_web_app(
         timezone: str = Form(default=""),
         home_address: str = Form(default=""),
         travel_mode: str = Form(default="drive"),
+        briefing_time: str = Form(default=""),
     ) -> HTMLResponse | RedirectResponse:
-        values = {"name": name, "timezone": timezone, "home_address": home_address, "travel_mode": travel_mode}
+        values = {"name": name, "timezone": timezone, "home_address": home_address, "travel_mode": travel_mode,
+                  "briefing_time": briefing_time}
         with lock:
             phone = users.phone_for_signup_token(t) if t else None
             user = users.get_by_phone(phone) if phone else None
@@ -208,6 +219,7 @@ def create_web_app(
             prefs = {
                 "name": preferences.validate_preference("name", name),
                 "travel_mode": preferences.validate_preference("travel_mode", travel_mode),
+                "briefing_time": preferences.validate_preference("briefing_time", briefing_time),
             }
             tz = preferences.validate_preference("timezone", timezone)
             if home_address.strip():
