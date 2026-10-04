@@ -82,7 +82,7 @@ def test_plans_next_event_with_a_location(setup):
         DENTIST,
     ], buffer_minutes=10)
 
-    result = build().call("plan_departure", ANN, {})
+    result = build().call("plan_departure", ANN, {"origin": "home"})
 
     assert result["event"]["title"] == "Dentist"
     assert result["status"] == "on_time"
@@ -98,7 +98,7 @@ def test_plans_a_specific_event_by_id(setup):
     later = event("dinner", "2026-10-04T19:00:00-04:00", "2026-10-04T21:00:00-04:00", "5 Food St")
     add_user(ANN, [DENTIST, later], travel_mode="transit")
 
-    result = build().call("plan_departure", ANN, {"event_id": "dinner"})
+    result = build().call("plan_departure", ANN, {"origin": "home", "event_id": "dinner"})
 
     assert result["event"]["title"] == "Dinner"
     assert result["leave_date"] == "Sun, Oct 4"
@@ -108,19 +108,55 @@ def test_plans_a_specific_event_by_id(setup):
 def test_unknown_event_id_points_to_get_events(setup):
     add_user, build, _ = setup
     add_user(ANN, [DENTIST])
-    assert "get_events" in build().call("plan_departure", ANN, {"event_id": "nope"})["error"]
+    assert "get_events" in build().call("plan_departure", ANN, {"origin": "home", "event_id": "nope"})["error"]
 
 
 def test_cancelled_event_is_reported(setup):
     add_user, build, _ = setup
     add_user(ANN, [event("gone", "2026-10-03T20:00:00-04:00", "2026-10-03T21:00:00-04:00", "X", status="cancelled")])
-    assert "cancelled" in build().call("plan_departure", ANN, {"event_id": "gone"})["error"]
+    assert "cancelled" in build().call("plan_departure", ANN, {"origin": "home", "event_id": "gone"})["error"]
+
+
+def test_without_origin_asks_where_they_leave_from(setup):
+    add_user, build, travel = setup
+    add_user(ANN, [DENTIST])
+    result = build().call("plan_departure", ANN, {"event_id": "dentist"})
+    assert "Ask the user where they'll be leaving from" in result["error"]
+    assert travel.calls == []
+
+
+def test_origin_address_is_used_instead_of_home(setup):
+    add_user, build, travel = setup
+    add_user(ANN, [DENTIST])
+    result = build().call("plan_departure", ANN, {"event_id": "dentist", "origin": " 200  Office Blvd "})
+    assert result["from"] == "200 Office Blvd"
+    assert travel.calls[0] == ("200 Office Blvd", "1 Main St", "drive")
+
+
+def test_home_origin_uses_saved_address_without_echoing_it(setup):
+    add_user, build, travel = setup
+    add_user(ANN, [DENTIST], home="10 Home Rd")
+    result = build().call("plan_departure", ANN, {"event_id": "dentist", "origin": "Home"})
+    assert result["from"] == "home address on file"
+    assert "10 Home Rd" not in str(result)
+    assert travel.calls[0][0] == "10 Home Rd"
+
+
+@pytest.mark.parametrize("origin, message", [
+    ("https://zoom.us/j/1", "not a link"),
+    ("x" * 301, "origin must be at most"),
+])
+def test_bad_origin_is_rejected(setup, origin, message):
+    add_user, build, travel = setup
+    add_user(ANN, [DENTIST])
+    assert message in build().call("plan_departure", ANN, {"event_id": "dentist", "origin": origin})["error"]
+    assert travel.calls == []
 
 
 def test_no_home_address_asks_for_it(setup):
     add_user, build, travel = setup
     add_user(ANN, [DENTIST], home=None)
-    result = build().call("plan_departure", ANN, {})
+    result = build().call("plan_departure", ANN, {"origin": "home"})
     assert "home_address" in result["error"]
     assert travel.calls == []
 
@@ -128,13 +164,13 @@ def test_no_home_address_asks_for_it(setup):
 def test_missing_maps_key_says_not_set_up(setup):
     add_user, build, _ = setup
     add_user(ANN, [DENTIST])
-    assert "isn't set up" in build(travel_times=None).call("plan_departure", ANN, {})["error"]
+    assert "isn't set up" in build(travel_times=None).call("plan_departure", ANN, {"origin": "home"})["error"]
 
 
 def test_event_without_location_asks_where_it_is(setup):
     add_user, build, travel = setup
     add_user(ANN, [event("interview", "2026-10-03T20:00:00-04:00", "2026-10-03T21:00:00-04:00")])
-    result = build().call("plan_departure", ANN, {"event_id": "interview"})
+    result = build().call("plan_departure", ANN, {"origin": "home", "event_id": "interview"})
     assert '"Interview" has no location' in result["error"]
     assert travel.calls == []
 
@@ -142,7 +178,7 @@ def test_event_without_location_asks_where_it_is(setup):
 def test_destination_fills_in_a_missing_location(setup):
     add_user, build, travel = setup
     add_user(ANN, [event("interview", "2026-10-03T20:00:00-04:00", "2026-10-03T21:00:00-04:00")])
-    result = build().call("plan_departure", ANN, {"event_id": "interview", "destination": " 9  Office  Park "})
+    result = build().call("plan_departure", ANN, {"origin": "home", "event_id": "interview", "destination": " 9  Office  Park "})
     assert result["destination"] == "9 Office Park"
     assert travel.calls[0][1] == "9 Office Park"
 
@@ -150,7 +186,7 @@ def test_destination_fills_in_a_missing_location(setup):
 def test_destination_does_not_override_calendar_location(setup):
     add_user, build, travel = setup
     add_user(ANN, [DENTIST])
-    build().call("plan_departure", ANN, {"event_id": "dentist", "destination": "Somewhere else"})
+    build().call("plan_departure", ANN, {"origin": "home", "event_id": "dentist", "destination": "Somewhere else"})
     assert travel.calls[0][1] == "1 Main St"
 
 
@@ -158,7 +194,7 @@ def test_online_meeting_is_not_sent_to_maps(setup):
     add_user, build, travel = setup
     zoom = "https://us02web.zoom.us/j/123?pwd=secret"
     add_user(ANN, [event("standup", "2026-10-03T20:00:00-04:00", "2026-10-03T21:00:00-04:00", zoom)])
-    result = build().call("plan_departure", ANN, {"event_id": "standup"})
+    result = build().call("plan_departure", ANN, {"origin": "home", "event_id": "standup"})
     assert "online meeting" in result["error"]
     assert travel.calls == []
 
@@ -169,13 +205,13 @@ def test_next_event_skips_online_meetings(setup):
         event("standup", "2026-10-03T18:00:00-04:00", "2026-10-03T18:30:00-04:00", "Google Meet: meet.google.com/abc"),
         DENTIST,
     ])
-    assert build().call("plan_departure", ANN, {})["event"]["title"] == "Dentist"
+    assert build().call("plan_departure", ANN, {"origin": "home"})["event"]["title"] == "Dentist"
 
 
 def test_destination_cannot_be_a_link(setup):
     add_user, build, travel = setup
     add_user(ANN, [event("interview", "2026-10-03T20:00:00-04:00", "2026-10-03T21:00:00-04:00")])
-    result = build().call("plan_departure", ANN, {"event_id": "interview", "destination": "https://zoom.us/j/1"})
+    result = build().call("plan_departure", ANN, {"origin": "home", "event_id": "interview", "destination": "https://zoom.us/j/1"})
     assert "street address" in result["error"]
     assert travel.calls == []
 
@@ -183,20 +219,20 @@ def test_destination_cannot_be_a_link(setup):
 def test_no_located_events_today_lists_them(setup):
     add_user, build, _ = setup
     add_user(ANN, [event("focus", "2026-10-03T19:00:00-04:00", "2026-10-03T19:30:00-04:00")])
-    error = build().call("plan_departure", ANN, {})["error"]
+    error = build().call("plan_departure", ANN, {"origin": "home"})["error"]
     assert '"Focus"' in error and "destination" in error
 
 
 def test_no_more_events_today(setup):
     add_user, build, _ = setup
     add_user(ANN, [event("lunch", "2026-10-03T12:00:00-04:00", "2026-10-03T13:00:00-04:00", "Cafe")])
-    assert "No more timed events today" in build().call("plan_departure", ANN, {})["error"]
+    assert "No more timed events today" in build().call("plan_departure", ANN, {"origin": "home"})["error"]
 
 
 def test_all_day_event_without_time_asks_for_one(setup):
     add_user, build, travel = setup
     add_user(ANN, [all_day("vacation", "2026-10-04")])
-    error = build().call("plan_departure", ANN, {"event_id": "vacation"})["error"]
+    error = build().call("plan_departure", ANN, {"origin": "home", "event_id": "vacation"})["error"]
     assert "all-day event on Sun, Oct 4" in error and "what time" in error and "arrive_by" in error
     assert "which day" not in error
     assert travel.calls == []
@@ -205,7 +241,7 @@ def test_all_day_event_without_time_asks_for_one(setup):
 def test_multi_day_event_asks_which_day_and_lists_the_dates(setup):
     add_user, build, travel = setup
     add_user(ANN, [all_day("hotel", "2026-10-02", end_day="2026-10-06")])
-    error = build().call("plan_departure", ANN, {"event_id": "hotel"})["error"]
+    error = build().call("plan_departure", ANN, {"origin": "home", "event_id": "hotel"})["error"]
     assert "runs from Fri, Oct 2 to Mon, Oct 5" in error
     assert "which day and what time" in error
     assert travel.calls == []
@@ -214,7 +250,7 @@ def test_multi_day_event_asks_which_day_and_lists_the_dates(setup):
 def test_multi_day_event_plan_reports_the_day_it_planned_for(setup):
     add_user, build, _ = setup
     add_user(ANN, [all_day("hotel", "2026-10-02", end_day="2026-10-06")], buffer_minutes=10)
-    result = build().call("plan_departure", ANN, {"event_id": "hotel", "arrive_by": "2026-10-04T15:00"})
+    result = build().call("plan_departure", ANN, {"origin": "home", "event_id": "hotel", "arrive_by": "2026-10-04T15:00"})
     assert (result["event"]["date"], result["event"]["last_date"]) == ("Fri, Oct 2", "Mon, Oct 5")
     assert (result["target_date"], result["leave_date"]) == ("Sun, Oct 4", "Sun, Oct 4")
 
@@ -222,7 +258,7 @@ def test_multi_day_event_plan_reports_the_day_it_planned_for(setup):
 def test_all_day_event_with_arrive_by_uses_its_location_and_buffer(setup):
     add_user, build, travel = setup
     add_user(ANN, [all_day("vacation", "2026-10-04")], buffer_minutes=10)
-    result = build().call("plan_departure", ANN, {"event_id": "vacation", "arrive_by": "2026-10-04T15:00"})
+    result = build().call("plan_departure", ANN, {"origin": "home", "event_id": "vacation", "arrive_by": "2026-10-04T15:00"})
     assert result["destination"] == "Beach"
     assert (result["target_date"], result["target_time"]) == ("Sun, Oct 4", "3:00 PM")
     assert result["target_is"] == "arrive_by time the user gave"
@@ -234,7 +270,7 @@ def test_all_day_event_with_arrive_by_uses_its_location_and_buffer(setup):
 def test_arrive_by_overrides_timed_event_start(setup):
     add_user, build, _ = setup
     add_user(ANN, [DENTIST], buffer_minutes=10)
-    result = build().call("plan_departure", ANN, {"event_id": "dentist", "arrive_by": "2026-10-03T19:30"})
+    result = build().call("plan_departure", ANN, {"origin": "home", "event_id": "dentist", "arrive_by": "2026-10-03T19:30"})
     assert result["target_time"] == "7:30 PM"
     assert result["leave_at"] == "6:55 PM"
 
@@ -242,7 +278,7 @@ def test_arrive_by_overrides_timed_event_start(setup):
 def test_trip_not_on_calendar_with_destination_and_arrive_by(setup):
     add_user, build, travel = setup
     add_user(ANN, [], buffer_minutes=0)
-    result = build().call("plan_departure", ANN, {"destination": "3505 S State St, Ann Arbor, MI",
+    result = build().call("plan_departure", ANN, {"origin": "home", "destination": "3505 S State St, Ann Arbor, MI",
                                                   "arrive_by": "2026-10-05T12:00"})
     assert result["event"] is None
     assert result["leave_at"] == "11:35 AM" and result["leave_date"] == "Mon, Oct 5"
@@ -252,7 +288,7 @@ def test_trip_not_on_calendar_with_destination_and_arrive_by(setup):
 def test_arrive_by_with_timezone_offset_is_respected(setup):
     add_user, build, _ = setup
     add_user(ANN, [], buffer_minutes=0)
-    result = build().call("plan_departure", ANN, {"destination": "X", "arrive_by": "2026-10-04T19:00:00+00:00"})
+    result = build().call("plan_departure", ANN, {"origin": "home", "destination": "X", "arrive_by": "2026-10-04T19:00:00+00:00"})
     assert result["target_time"] == "3:00 PM"
 
 
@@ -264,7 +300,7 @@ def test_arrive_by_with_timezone_offset_is_respected(setup):
 def test_bad_arrive_by_is_rejected(setup, arrive_by, message):
     add_user, build, travel = setup
     add_user(ANN, [])
-    result = build().call("plan_departure", ANN, {"destination": "X", "arrive_by": arrive_by})
+    result = build().call("plan_departure", ANN, {"origin": "home", "destination": "X", "arrive_by": arrive_by})
     assert message in result["error"]
     assert travel.calls == []
 
@@ -272,13 +308,13 @@ def test_bad_arrive_by_is_rejected(setup, arrive_by, message):
 def test_event_already_started(setup):
     add_user, build, _ = setup
     add_user(ANN, [event("meeting", "2026-10-03T17:00:00-04:00", "2026-10-03T18:00:00-04:00", "HQ")])
-    assert "already started" in build().call("plan_departure", ANN, {"event_id": "meeting"})["error"]
+    assert "already started" in build().call("plan_departure", ANN, {"origin": "home", "event_id": "meeting"})["error"]
 
 
 def test_running_late_reports_minutes_late(setup):
     add_user, build, _ = setup
     add_user(ANN, [event("call", "2026-10-03T17:30:00-04:00", "2026-10-03T18:00:00-04:00", "HQ")])
-    result = build().call("plan_departure", ANN, {})
+    result = build().call("plan_departure", ANN, {"origin": "home"})
     assert result["status"] == "late"
     assert result["leave_at"] == "5:14 PM"
     assert result["late_by_minutes"] == 9
@@ -289,7 +325,7 @@ def test_event_after_midnight_shows_leave_date_the_day_before(setup):
     add_user(ANN, [event("flight", "2026-10-04T00:15:00-04:00", "2026-10-04T03:00:00-04:00", "JFK")],
              buffer_minutes=10)
     build_service = build(travel_times=FakeTravel(timedelta(minutes=30)))
-    result = build_service.call("plan_departure", ANN, {"event_id": "flight"})
+    result = build_service.call("plan_departure", ANN, {"origin": "home", "event_id": "flight"})
     assert (result["leave_date"], result["leave_at"]) == ("Sat, Oct 3", "11:35 PM")
     assert result["event"]["date"] == "Sun, Oct 4"
 
@@ -298,7 +334,7 @@ def test_maps_errors_are_passed_on(setup):
     add_user, build, _ = setup
     add_user(ANN, [DENTIST])
     service = build(travel_times=FakeTravel(error=MapsError("Google Maps found no walk route between those places.")))
-    assert "no walk route" in service.call("plan_departure", ANN, {})["error"]
+    assert "no walk route" in service.call("plan_departure", ANN, {"origin": "home"})["error"]
 
 
 def test_each_user_plans_from_their_own_home_and_calendar(setup):
@@ -308,9 +344,9 @@ def test_each_user_plans_from_their_own_home_and_calendar(setup):
              home="Bob's Flat", travel_mode="bicycle")
     service = build()
 
-    ann = service.call("plan_departure", ANN, {})
-    bob = service.call("plan_departure", BOB, {})
-    ann_by_bobs_event = service.call("plan_departure", ANN, {"event_id": "gym"})
+    ann = service.call("plan_departure", ANN, {"origin": "home"})
+    bob = service.call("plan_departure", BOB, {"origin": "home"})
+    ann_by_bobs_event = service.call("plan_departure", ANN, {"origin": "home", "event_id": "gym"})
 
     assert ann["event"]["title"] == "Dentist" and bob["event"]["title"] == "Gym"
     assert set(travel.calls) == {("Ann's House", "1 Main St", "drive"), ("Bob's Flat", "Gym St", "bicycle")}

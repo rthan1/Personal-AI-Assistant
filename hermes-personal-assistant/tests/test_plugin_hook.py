@@ -50,6 +50,7 @@ def test_hook_fails_open_when_bridge_is_down(plugin, monkeypatch):
     ("set_preference", {"key": "home_address", "value": "1 Main St, Springfield, IL"}),
     ("forget", {"memory_id": 3}),
     ("forget", {"memory_id": "all"}),
+    ("plan_departure", {"origin": "home", "event_id": "abc"}),
     ("find_places", {"query": "ramen", "near": "Ann Arbor", "max_price": 2, "min_rating": 4.5, "open_now": True}),
     ("find_places", {"query": "bowling", "event_id": "abc", "min_rating": 4}),
 ])

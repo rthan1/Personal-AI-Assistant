@@ -273,9 +273,7 @@ class ToolService:
     def plan_departure(self, user: User, args: dict) -> dict:
         if self._travel_times is None:
             raise ToolError("Travel time isn't set up on this assistant yet.")
-        if not user.home_address:
-            raise ToolError("No home address saved. Ask the user where they'll leave from, save it with "
-                            "set_preference (key home_address), then try again.")
+        origin, origin_label = _departure_origin(user, args.get("origin"))
         tz = ZoneInfo(user.timezone)
         now = self._now()
         fallback_destination = _clean_destination(args.get("destination"))
@@ -299,7 +297,7 @@ class ToolService:
                             "then call plan_departure again with that address as destination.")
 
         def estimate(depart_at: datetime) -> timedelta:
-            return self._travel_times.get_travel_time(user.home_address, destination, user.travel_mode, depart_at)
+            return self._travel_times.get_travel_time(origin, destination, user.travel_mode, depart_at)
 
         target = arrive_by or event.start
         try:
@@ -323,7 +321,7 @@ class ToolService:
             "travel_mode": user.travel_mode,
             "buffer_minutes": user.buffer_minutes,
             "late_by_minutes": _whole_minutes(plan.late_by),
-            "from": "home address on file",
+            "from": origin_label,
         }
 
     def _departure_event(
@@ -523,6 +521,22 @@ def _clean_destination(value: Any, field: str = "destination") -> str | None:
     if len(text) > preferences.MAX_ADDRESS_LENGTH:
         raise ValueError(f"{field} must be at most {preferences.MAX_ADDRESS_LENGTH} characters.")
     return text
+
+
+def _departure_origin(user: User, value: Any) -> tuple[str, str]:
+    """(address sent to Maps, label for the reply). "home" means the saved home address, which is never echoed."""
+    origin = _clean_destination(value, "origin")
+    if origin is None:
+        raise ToolError("No starting point. Ask the user where they'll be leaving from (or whether it's home), "
+                        "then call plan_departure again with origin.")
+    if calendar_service.is_online_location(origin):
+        raise ValueError("origin must be a street address or place, not a link.")
+    if origin.lower() not in {"home", "my home"}:
+        return origin, origin
+    if not user.home_address:
+        raise ToolError("No home address saved. Ask for their home address, save it with set_preference (key "
+                        "home_address), then call plan_departure again with origin \"home\".")
+    return user.home_address, "home address on file"
 
 
 def _clean_place_query(value: Any) -> str:

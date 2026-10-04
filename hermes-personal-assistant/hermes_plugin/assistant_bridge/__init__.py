@@ -54,11 +54,16 @@ TOOLS = [
     ),
     _schema(
         "plan_departure",
-        "Work out when the user should leave for a calendar event: Google Maps travel time (live traffic) from their "
-        "saved home address with their travel mode, arriving their buffer minutes early. Without event_id, uses "
-        "their next event today that has a location. With destination and arrive_by but no event_id, plans a trip "
-        "that isn't on the calendar.",
+        "Work out when the user should leave for a calendar event: Google Maps travel time (live traffic) from "
+        "origin with their travel mode, arriving their buffer minutes early. Without event_id, uses their next "
+        "event today that has a location. With destination and arrive_by but no event_id, plans a trip that isn't "
+        "on the calendar.",
         {
+            "origin": {
+                "type": "string",
+                "description": "Where they'll leave from: an address or place, or \"home\" for their saved home "
+                               "address. If they haven't said, ask them first.",
+            },
             "event_id": {"type": "string", "description": "Optional event id from get_events"},
             "destination": {"type": "string", "description": "Optional address, used only if the event has no location"},
             "arrive_by": {
