@@ -45,11 +45,13 @@ TOOLS = [
         "Save one user preference.",
         {
             "key": {"type": "string", "enum": ["home_address", "travel_mode", "buffer_minutes", "timezone", "name",
-                                               "default_reminder_minutes"]},
+                                               "default_reminder_minutes", "briefing_time"]},
             "value": {
                 "type": ["string", "number"],
                 "description": "travel_mode: drive|transit|walk|bicycle; buffer_minutes: 0-120; "
-                               "default_reminder_minutes: 1-1440 for a reminder before every event, or 0 for off",
+                               "default_reminder_minutes: 1-1440 for a reminder before every event, or 0 for off; "
+                               "briefing_time: local time like \"7:30 AM\" for a daily text listing that day's "
+                               "events, or \"off\"",
             },
         },
         required=("key", "value"),

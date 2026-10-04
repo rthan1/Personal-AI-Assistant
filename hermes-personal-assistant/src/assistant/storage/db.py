@@ -69,6 +69,10 @@ MIGRATIONS = [
     );
     CREATE INDEX reminders_due ON reminders (status, remind_at);
     """,
+    """
+    ALTER TABLE users ADD COLUMN briefing_time TEXT;
+    ALTER TABLE users ADD COLUMN briefing_sent_on TEXT;
+    """,
 ]
 
 

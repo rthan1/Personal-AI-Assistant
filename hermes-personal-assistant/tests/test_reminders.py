@@ -2,6 +2,7 @@ import json
 import os
 import subprocess
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import httplib2
 import pytest
@@ -13,8 +14,10 @@ from assistant.messaging.hermes_send import HermesSender, MessagingError, safe_t
 from assistant.scheduler import reminders as scheduler_module
 from assistant.scheduler.reminders import ReminderScheduler
 from assistant.storage.reminders import ReminderRepo
+from assistant.tools import preferences
 from test_plan_departure import FakeCalendar, all_day, event
 
+NY = ZoneInfo("America/New_York")
 NOW = datetime(2026, 10, 3, 21, 0, tzinfo=timezone.utc)  # 5:00 PM in New York
 ANN = "+15551111111"
 BOB = "+15552222222"
@@ -337,6 +340,155 @@ def test_media_directives_in_titles_are_defanged(world):
     world.calendars[f"token-{ANN}"].items["x"]["summary"] = "MEDIA:C:\\secret.env"
     listed_events = world.service.call("get_events", ANN, {})
     assert "MEDIA:" not in json.dumps(listed_events)
+
+
+# --- daily briefing ---
+
+LUNCH = event("lunch", "2026-10-03T12:00:00-04:00", "2026-10-03T13:00:00-04:00", "Cafe")
+STANDUP = event("standup", "2026-10-03T18:00:00-04:00", "2026-10-03T18:15:00-04:00", "https://meet.google.com/abc")
+
+
+@pytest.mark.parametrize("value, expected", [
+    ("7:30 AM", "07:30"), ("7am", "07:00"), ("7 p.m.", "19:00"), ("12am", "00:00"), ("12 PM", "12:00"),
+    ("19:05", "19:05"), (7, "07:00"), (7.0, "07:00"), ("0:00", "00:00"),
+    ("off", None), (0, None), (None, None),
+])
+def test_parse_clock_time(value, expected):
+    assert preferences.parse_clock_time(value) == expected
+
+
+@pytest.mark.parametrize("value", ["25:00", "7:60", "13pm", "0am", "noonish", "7:5", True])
+def test_parse_clock_time_rejects_bad_times(value):
+    with pytest.raises(ValueError):
+        preferences.parse_clock_time(value)
+
+
+def test_briefing_preference_is_saved_and_shown_in_context(world):
+    world.add_user(ANN)
+    result = world.service.call("set_preference", ANN, {"key": "briefing_time", "value": "7:30 am"})
+    assert result["value"] == "07:30" and result["sends_daily_at"] == "7:30 AM"
+    assert world.service.call("get_preferences", ANN, {})["briefing_time"] == "07:30"
+    assert "daily briefing text: 7:30 AM" in world.service.context(ANN)["context"]
+
+
+def test_briefing_off_by_default_and_can_be_turned_off(world):
+    world.add_user(ANN, briefing_time="07:30")
+    assert world.service.call("set_preference", ANN, {"key": "briefing_time", "value": "off"})["value"] is None
+    assert "daily briefing text: off" in world.service.context(ANN)["context"]
+
+
+def test_briefing_message_lists_remaining_events():
+    events = [scheduler_module.calendar_service.parse_event(raw, NY)
+              for raw in (all_day("trip", "2026-10-03"), LUNCH, STANDUP, DENTIST)]
+    text = scheduler_module.briefing_message(events, NOW, NY, "Ann Lee")
+    assert text == (
+        "Good evening, Ann! You have 3 things on your calendar today (Sat, Oct 3):\n"
+        "- All day: Trip @ Beach\n"
+        "- 6:00 PM: Standup (online)\n"
+        "- 7:00 PM: Dentist @ 1 Main St\n"
+        'Text me "when should I leave?" for live travel times.'
+    )
+
+
+def test_briefing_message_for_empty_and_finished_days():
+    lunch = scheduler_module.calendar_service.parse_event(LUNCH, NY)
+    morning = datetime(2026, 10, 3, 11, 0, tzinfo=timezone.utc)
+    assert scheduler_module.briefing_message([], morning, NY) == (
+        "Good morning! Your calendar is clear for today (Sat, Oct 3).")
+    assert "clear for the rest of today" in scheduler_module.briefing_message([lunch], NOW, NY)
+
+
+def test_briefing_message_caps_long_days():
+    events = [scheduler_module.calendar_service.parse_event(
+        event(f"e{i}", "2026-10-03T19:00:00-04:00", "2026-10-03T20:00:00-04:00"), NY) for i in range(10)]
+    text = scheduler_module.briefing_message(events, NOW, NY)
+    assert text.count("\n- ") == scheduler_module.MAX_BRIEFING_EVENTS and text.endswith("...and 2 more.")
+
+
+def test_briefing_sent_once_at_its_time(world):
+    world.add_user(ANN, [DENTIST], briefing_time="17:30", name="Ann")
+    world.scheduler.send_briefings()
+    assert world.sender.sent == []
+
+    world.clock.now = NOW + timedelta(minutes=30)
+    world.scheduler.send_briefings()
+    world.scheduler.send_briefings()
+    assert len(world.sender.sent) == 1
+    phone, text = world.sender.sent[0]
+    assert phone == ANN and text.startswith("Good evening, Ann! You have 1 thing") and "Dentist" in text
+
+
+def test_briefing_sent_again_the_next_day(world):
+    world.add_user(ANN, briefing_time="17:00")
+    world.scheduler.send_briefings()
+    world.clock.now = NOW + timedelta(days=1)
+    world.scheduler.send_briefings()
+    assert len(world.sender.sent) == 2
+
+
+def test_missed_briefing_is_dropped_after_the_window(world):
+    world.add_user(ANN, briefing_time="15:59")
+    world.scheduler.send_briefings()
+    assert world.sender.sent == []
+
+
+def test_resetting_briefing_time_allows_another_today(world):
+    world.add_user(ANN, briefing_time="17:00")
+    world.scheduler.send_briefings()
+    world.service.call("set_preference", ANN, {"key": "briefing_time", "value": "4:30 PM"})
+    world.scheduler.send_briefings()
+    assert len(world.sender.sent) == 2
+
+
+def test_each_briefing_reads_its_owners_calendar(world):
+    world.add_user(ANN, [DENTIST], briefing_time="17:00")
+    world.add_user(BOB, [event("gym", "2026-10-03T19:00:00-04:00", "2026-10-03T20:00:00-04:00")],
+                   briefing_time="17:00")
+    world.add_user("+15553333333", [DENTIST])
+    world.scheduler.send_briefings()
+    sent = dict(world.sender.sent)
+    assert set(sent) == {ANN, BOB}
+    assert "Dentist" in sent[ANN] and "Gym" not in sent[ANN]
+    assert "Gym" in sent[BOB] and "Dentist" not in sent[BOB]
+
+
+def test_failed_briefing_send_is_retried(world):
+    world.add_user(ANN, briefing_time="17:00")
+    world.sender.fail = True
+    world.scheduler.send_briefings()
+    world.sender.fail = False
+    world.scheduler.send_briefings()
+    assert len(world.sender.sent) == 1
+
+
+def test_briefing_calendar_outage_is_retried(world):
+    world.add_user(ANN, [DENTIST], briefing_time="17:00")
+    calendar = world.calendars[f"token-{ANN}"]
+    real_list = calendar.list_events
+    calendar.list_events = lambda *a: (_ for _ in ()).throw(HttpError(httplib2.Response({"status": "503"}), b""))
+    world.scheduler.send_briefings()
+    calendar.list_events = real_list
+    world.scheduler.send_briefings()
+    assert len(world.sender.sent) == 1
+
+
+def test_briefing_skipped_for_the_day_when_calendar_disconnected(world, monkeypatch):
+    world.add_user(ANN, briefing_time="17:00")
+
+    def disconnected(token):
+        raise scheduler_module.GoogleAuthError("expired")
+
+    monkeypatch.setattr(scheduler_module, "credentials_from_token", disconnected)
+    world.scheduler.send_briefings()
+    monkeypatch.setattr(scheduler_module, "credentials_from_token", lambda token: (token, None))
+    world.scheduler.send_briefings()
+    assert world.sender.sent == []
+
+
+def test_tick_sends_briefings(world):
+    world.add_user(ANN, briefing_time="17:00")
+    world.scheduler.tick()
+    assert len(world.sender.sent) == 1
 
 
 # --- hermes send wrapper ---

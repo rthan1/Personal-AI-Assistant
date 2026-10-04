@@ -1,11 +1,12 @@
 import secrets
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from cryptography.fernet import Fernet, InvalidToken
 
-PREFERENCE_COLUMNS = ("name", "timezone", "home_address", "travel_mode", "buffer_minutes", "default_reminder_minutes")
+PREFERENCE_COLUMNS = ("name", "timezone", "home_address", "travel_mode", "buffer_minutes", "default_reminder_minutes",
+                      "briefing_time")
 SIGNUP_TOKEN_MAX_AGE = timedelta(hours=1)
 
 
@@ -28,6 +29,7 @@ class User:
     buffer_minutes: int
     google_connected: bool
     default_reminder_minutes: int | None = None
+    briefing_time: str | None = None  # local "HH:MM"
 
 
 def _row_to_user(row: sqlite3.Row) -> User:
@@ -41,6 +43,7 @@ def _row_to_user(row: sqlite3.Row) -> User:
         buffer_minutes=row["buffer_minutes"],
         google_connected=row["google_token"] is not None,
         default_reminder_minutes=row["default_reminder_minutes"],
+        briefing_time=row["briefing_time"],
     )
 
 
@@ -62,6 +65,22 @@ class UserRepo:
             "SELECT * FROM users WHERE default_reminder_minutes IS NOT NULL AND google_token IS NOT NULL"
         ).fetchall()
         return [_row_to_user(row) for row in rows]
+
+    def list_with_briefings(self) -> list[User]:
+        rows = self._conn.execute(
+            "SELECT * FROM users WHERE briefing_time IS NOT NULL AND google_token IS NOT NULL"
+        ).fetchall()
+        return [_row_to_user(row) for row in rows]
+
+    def briefing_sent_on(self, user_id: int) -> date | None:
+        row = self._conn.execute("SELECT briefing_sent_on FROM users WHERE id = ?", (user_id,)).fetchone()
+        return date.fromisoformat(row["briefing_sent_on"]) if row and row["briefing_sent_on"] else None
+
+    def set_briefing_sent_on(self, user_id: int, day: date | None) -> None:
+        """`day` is the user's local date, so each user gets at most one briefing per local day."""
+        with self._conn:
+            self._conn.execute("UPDATE users SET briefing_sent_on = ? WHERE id = ?",
+                               (day.isoformat() if day else None, user_id))
 
     def upsert(self, phone: str, timezone: str, **prefs) -> User:
         existing = self.get_by_phone(phone)

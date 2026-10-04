@@ -111,6 +111,7 @@ class ToolService:
             f"- travel mode: {user.travel_mode}, buffer: {user.buffer_minutes} min",
             "- reminder before every event: "
             + (f"{user.default_reminder_minutes} min" if user.default_reminder_minutes else "off"),
+            f"- daily briefing text: {_display_clock(user.briefing_time) if user.briefing_time else 'off'}",
         ]
         if not user.google_connected:
             lines.append(f"- To connect their calendar, send this link exactly: {self._signup_link(user.phone)}")
@@ -168,6 +169,11 @@ class ToolService:
         updated = self._users.update_preferences(user.id, **{key: value})
         if key == "default_reminder_minutes":
             self._reminders.delete_pending_defaults(user.id)
+        if key == "briefing_time":
+            self._users.set_briefing_sent_on(user.id, None)
+            if value:
+                return {"ok": True, "key": key, "value": value, "sends_daily_at": _display_clock(value),
+                        "note": "If that time passed less than an hour ago, today's briefing goes out within a minute."}
         return {"ok": True, "key": key, "value": getattr(updated, key)}
 
     def remember(self, user: User, args: dict) -> dict:
@@ -694,3 +700,7 @@ def _place_summary(place: places_service.Place, center: places_service.LatLng) -
 
 def _whole_minutes(duration: timedelta) -> int:
     return math.ceil(duration.total_seconds() / 60)
+
+
+def _display_clock(hhmm: str) -> str:
+    return calendar_service.display_time(datetime.strptime(hhmm, "%H:%M"))

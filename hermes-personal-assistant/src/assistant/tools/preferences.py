@@ -8,7 +8,10 @@ MAX_ADDRESS_LENGTH = 300
 MAX_NAME_LENGTH = 80
 MAX_REMINDER_MINUTES = 1440
 
-SETTABLE_PREFERENCES = ("home_address", "travel_mode", "buffer_minutes", "timezone", "name", "default_reminder_minutes")
+SETTABLE_PREFERENCES = ("home_address", "travel_mode", "buffer_minutes", "timezone", "name", "default_reminder_minutes",
+                        "briefing_time")
+OFF_VALUES = {"", "0", "off", "none", "no", "false"}
+CLOCK_TIME = re.compile(r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)?")
 
 
 def normalize_phone(raw: str) -> str:
@@ -44,6 +47,29 @@ def validate_reminder_minutes(value: Any, field: str = "minutes_before") -> int:
     return minutes
 
 
+def parse_clock_time(value: Any) -> str | None:
+    """A local time of day like "7", "7:30", "7am", "7:30 p.m." or "19:30" as "HH:MM"; None for 0/"off"."""
+    error = 'briefing_time must be a time of day like "7:30 AM" or "19:30", or "off".'
+    if value is None or value is False:
+        return None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        value = parse_whole_number(value, error)
+    text = str(value).strip().lower().replace("a.m.", "am").replace("p.m.", "pm")
+    if text in OFF_VALUES:
+        return None
+    match = CLOCK_TIME.fullmatch(text)
+    if not match:
+        raise ValueError(error)
+    hour, minute, meridiem = int(match[1]), int(match[2] or 0), match[3]
+    if meridiem:
+        if not 1 <= hour <= 12:
+            raise ValueError(error)
+        hour = hour % 12 + (12 if meridiem == "pm" else 0)
+    if hour > 23 or minute > 59:
+        raise ValueError(error)
+    return f"{hour:02d}:{minute:02d}"
+
+
 def validate_preference(key: str, value: Any) -> Any:
     if key not in SETTABLE_PREFERENCES:
         raise ValueError(f"Unknown preference {key!r}. Allowed: {', '.join(SETTABLE_PREFERENCES)}.")
@@ -69,6 +95,9 @@ def validate_preference(key: str, value: Any) -> Any:
         if minutes == 0:
             return None
         return validate_reminder_minutes(minutes, "default_reminder_minutes")
+
+    if key == "briefing_time":
+        return parse_clock_time(value)
 
     if key == "timezone":
         tz = str(value).strip()

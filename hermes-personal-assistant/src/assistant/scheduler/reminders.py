@@ -3,7 +3,7 @@
 import logging
 import math
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
@@ -21,6 +21,11 @@ CHECK_INTERVAL_SECONDS = 30
 DEFAULTS_SYNC_INTERVAL = timedelta(minutes=5)
 MAX_TITLE_IN_MESSAGE = 120
 MAX_LOCATION_IN_MESSAGE = 150
+BRIEFING_WINDOW = timedelta(hours=1)  # a missed briefing (app down, Google outage) is dropped after this
+MAX_BRIEFING_EVENTS = 8
+MAX_TITLE_IN_BRIEFING = 80
+MAX_LOCATION_IN_BRIEFING = 60
+MAX_NAME_IN_MESSAGE = 40
 
 CalendarSourceFactory = Callable[[Any], calendar_service.EventSource]
 
@@ -46,6 +51,39 @@ def reminder_message(event: calendar_service.CalendarEvent, now: datetime, tz: Z
         lines.append("It's an online meeting.")
     elif event.location:
         lines.append(f"Where: {_short(event.location, MAX_LOCATION_IN_MESSAGE)}")
+    return "\n".join(lines)
+
+
+def _greeting(local_now: datetime, name: str | None) -> str:
+    part = "morning" if local_now.hour < 12 else "afternoon" if local_now.hour < 17 else "evening"
+    first_name = _short(name.split()[0], MAX_NAME_IN_MESSAGE) if name and name.split() else ""
+    return f"Good {part}, {first_name}!" if first_name else f"Good {part}!"
+
+
+def briefing_message(events: list[calendar_service.CalendarEvent], now: datetime, tz: ZoneInfo,
+                     name: str | None = None) -> str:
+    """Today's events that haven't ended yet, as a short text. `events` are the user's events for today."""
+    local_now = now.astimezone(tz)
+    greeting = _greeting(local_now, name)
+    upcoming = [e for e in events if e.all_day or e.end > now]
+    if not upcoming:
+        rest = "the rest of today" if events else "today"
+        return f"{greeting} Your calendar is clear for {rest} ({calendar_service.display_date(local_now)})."
+
+    count = f"{len(upcoming)} thing{'s' if len(upcoming) != 1 else ''}"
+    lines = [f"{greeting} You have {count} on your calendar today ({calendar_service.display_date(local_now)}):"]
+    for event in upcoming[:MAX_BRIEFING_EVENTS]:
+        when = "All day" if event.all_day else calendar_service.display_time(event.start.astimezone(tz))
+        line = f"- {when}: {_short(event.title, MAX_TITLE_IN_BRIEFING)}"
+        if event.location and calendar_service.is_online_location(event.location):
+            line += " (online)"
+        elif event.location:
+            line += f" @ {_short(event.location, MAX_LOCATION_IN_BRIEFING)}"
+        lines.append(line)
+    if len(upcoming) > MAX_BRIEFING_EVENTS:
+        lines.append(f"...and {len(upcoming) - MAX_BRIEFING_EVENTS} more.")
+    if any(e.location and not e.all_day and not calendar_service.is_online_location(e.location) for e in upcoming):
+        lines.append('Text me "when should I leave?" for live travel times.')
     return "\n".join(lines)
 
 
@@ -80,6 +118,7 @@ class ReminderScheduler:
             self._reminders.prune(now)
             self._last_defaults_sync = now
         self.send_due()
+        self.send_briefings()
 
     def sync_defaults(self) -> None:
         """Creates the automatic reminder for each upcoming timed event of users who turned them on."""
@@ -140,6 +179,37 @@ class ReminderScheduler:
             return
         self._reminders.mark(reminder.id, "sent")
         log.info("Sent reminder %s to user %s", reminder.id, user.id)
+
+    def send_briefings(self) -> None:
+        for user in self._users.list_with_briefings():
+            try:
+                self._send_briefing(user)
+            except Exception:
+                log.exception("Briefing for user %s failed; will retry", user.id)
+
+    def _send_briefing(self, user: User) -> None:
+        now = self._now()
+        tz = ZoneInfo(user.timezone)
+        local_now = now.astimezone(tz)
+        today = local_now.date()
+        due = datetime.combine(today, time.fromisoformat(user.briefing_time), tz)
+        if not due <= local_now < due + BRIEFING_WINDOW or self._users.briefing_sent_on(user.id) == today:
+            return
+        try:
+            events = calendar_service.get_events(self._source(user), today, today, tz)
+        except GoogleAuthError as exc:
+            log.warning("Briefing skipped for user %s, calendar not connected: %s", user.id, exc)
+            self._users.set_briefing_sent_on(user.id, today)
+            return
+        except HttpError as exc:
+            log.warning("Briefing for user %s delayed by a calendar error: %s", user.id, exc)
+            return
+        try:
+            self._sender.send(user.phone, briefing_message(events, now, tz, user.name))
+        except MessagingError:
+            return
+        self._users.set_briefing_sent_on(user.id, today)
+        log.info("Sent daily briefing to user %s", user.id)
 
     def _source(self, user: User) -> calendar_service.EventSource:
         creds, refreshed = credentials_from_token(self._users.get_google_token(user.id))
