@@ -53,6 +53,22 @@ MIGRATIONS = [
     );
     CREATE INDEX pending_changes_user_id ON pending_changes (user_id);
     """,
+    """
+    ALTER TABLE users ADD COLUMN default_reminder_minutes INTEGER;
+    CREATE TABLE reminders (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        event_id TEXT NOT NULL,
+        event_start TEXT NOT NULL,
+        minutes_before INTEGER NOT NULL,
+        remind_at TEXT NOT NULL,
+        is_default INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'pending',
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+        UNIQUE (user_id, event_id, minutes_before)
+    );
+    CREATE INDEX reminders_due ON reminders (status, remind_at);
+    """,
 ]
 
 

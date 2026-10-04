@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 from cryptography.fernet import Fernet, InvalidToken
 
-PREFERENCE_COLUMNS = ("name", "timezone", "home_address", "travel_mode", "buffer_minutes")
+PREFERENCE_COLUMNS = ("name", "timezone", "home_address", "travel_mode", "buffer_minutes", "default_reminder_minutes")
 SIGNUP_TOKEN_MAX_AGE = timedelta(hours=1)
 
 
@@ -27,6 +27,7 @@ class User:
     travel_mode: str
     buffer_minutes: int
     google_connected: bool
+    default_reminder_minutes: int | None = None
 
 
 def _row_to_user(row: sqlite3.Row) -> User:
@@ -39,6 +40,7 @@ def _row_to_user(row: sqlite3.Row) -> User:
         travel_mode=row["travel_mode"],
         buffer_minutes=row["buffer_minutes"],
         google_connected=row["google_token"] is not None,
+        default_reminder_minutes=row["default_reminder_minutes"],
     )
 
 
@@ -54,6 +56,12 @@ class UserRepo:
     def get(self, user_id: int) -> User | None:
         row = self._conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
         return _row_to_user(row) if row else None
+
+    def list_with_default_reminders(self) -> list[User]:
+        rows = self._conn.execute(
+            "SELECT * FROM users WHERE default_reminder_minutes IS NOT NULL AND google_token IS NOT NULL"
+        ).fetchall()
+        return [_row_to_user(row) for row in rows]
 
     def upsert(self, phone: str, timezone: str, **prefs) -> User:
         existing = self.get_by_phone(phone)

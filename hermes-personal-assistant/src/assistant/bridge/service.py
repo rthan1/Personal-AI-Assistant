@@ -1,5 +1,6 @@
 import json
 import math
+import re
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
@@ -9,6 +10,7 @@ from googleapiclient.errors import HttpError
 
 from assistant.storage.memories import Memory, MemoryRepo
 from assistant.storage.pending_changes import PendingChangeRepo
+from assistant.storage.reminders import ReminderRepo
 from assistant.storage.users import User, UserRepo
 from assistant.tools import (
     calendar_edits, calendar_service, clock, departure_planner, maps_service, places_service, preferences,
@@ -21,6 +23,7 @@ MAX_PLACE_RESULTS = 3
 MAX_PLACE_QUERY_LENGTH = 100
 PLACE_SEARCH_RADIUS_M = {"walk": 3_000, "bicycle": 8_000, "transit": 8_000, "drive": 15_000}
 PRICE_SYMBOLS = {0: "free", 1: "$", 2: "$$", 3: "$$$", 4: "$$$$"}
+MEDIA_DIRECTIVE = re.compile(r"media\s*:", re.IGNORECASE)
 
 
 class ToolError(Exception):
@@ -40,6 +43,7 @@ class ToolService:
         memories: MemoryRepo | None = None,
         pending_changes: PendingChangeRepo | None = None,
         places: places_service.PlaceSource | None = None,
+        reminders: ReminderRepo | None = None,
     ):
         self._users = users
         self._public_base_url = public_base_url.rstrip("/")
@@ -49,6 +53,7 @@ class ToolService:
         self._memories = memories
         self._pending_changes = pending_changes
         self._places = places
+        self._reminders = reminders
         self._tools: dict[str, Callable[[User, dict], dict]] = {
             "get_current_time": self.get_current_time,
             "get_events": self.get_events,
@@ -62,6 +67,9 @@ class ToolService:
             "delete_event": self.delete_event,
             "confirm_change": self.confirm_change,
             "find_places": self.find_places,
+            "set_reminder": self.set_reminder,
+            "list_reminders": self.list_reminders,
+            "cancel_reminder": self.cancel_reminder,
         }
 
     def call(self, tool: str, sender: str, args: dict | None) -> dict:
@@ -72,11 +80,11 @@ class ToolService:
         if user is None:
             return {"error": "not_signed_up", "message": not_signed_up}
         try:
-            return handler(user, args or {})
+            return _defang(handler(user, args or {}))
         except TypeError as exc:
             return {"error": f"Bad arguments for {tool}: {exc}"}
         except (ToolError, ValueError) as exc:
-            return {"error": str(exc)}
+            return {"error": _defang(str(exc))}
 
     def context(self, sender: str) -> dict:
         """Short note about the sender that the plugin adds to every turn, so the model knows who it's talking to.
@@ -101,12 +109,14 @@ class ToolService:
             f"- Google Calendar connected: {'yes' if user.google_connected else 'no'}",
             f"- home address saved: {'yes' if user.home_address else 'no'}",
             f"- travel mode: {user.travel_mode}, buffer: {user.buffer_minutes} min",
+            "- reminder before every event: "
+            + (f"{user.default_reminder_minutes} min" if user.default_reminder_minutes else "off"),
         ]
         if not user.google_connected:
             lines.append(f"- To connect their calendar, send this link exactly: {self._signup_link(user.phone)}")
         if self._memories is not None:
             lines.extend(_memory_lines(self._memories.list(user.id)))
-        return {"context": "\n".join(lines)}
+        return {"context": _defang("\n".join(lines))}
 
     def _resolve(self, sender: str) -> tuple[User | None, str | None]:
         """(user, None) for a signed-up sender, else (None, message explaining how to sign up)."""
@@ -153,7 +163,11 @@ class ToolService:
     def set_preference(self, user: User, args: dict) -> dict:
         key = args.get("key")
         value = preferences.validate_preference(key, args.get("value"))
+        if key == "default_reminder_minutes":
+            self._reminder_repo()
         updated = self._users.update_preferences(user.id, **{key: value})
+        if key == "default_reminder_minutes":
+            self._reminders.delete_pending_defaults(user.id)
         return {"ok": True, "key": key, "value": getattr(updated, key)}
 
     def remember(self, user: User, args: dict) -> dict:
@@ -353,6 +367,81 @@ class ToolService:
         raise ToolError(f"None of today's remaining events ({titles}) have a location. Ask which one and where it "
                         "is, then call plan_departure with event_id and destination.")
 
+    def set_reminder(self, user: User, args: dict) -> dict:
+        repo = self._reminder_repo()
+        minutes = preferences.validate_reminder_minutes(args.get("minutes_before"))
+        tz = ZoneInfo(user.timezone)
+        try:
+            event = calendar_service.get_event(self._calendar_source(user), args.get("event_id"), tz)
+        except HttpError as exc:
+            if exc.status_code in (404, 410):
+                raise ToolError("No event with that id on the user's calendar. Call get_events to find it.") from exc
+            raise _calendar_error(exc) from exc
+        if event is None:
+            raise ToolError("That event was cancelled.")
+        if event.all_day:
+            raise ToolError(f"{json.dumps(event.title)} is an all-day event with no start time, so it can't have a "
+                            "reminder. Offer to add a timed event for it instead.")
+        now = self._now()
+        if event.start <= now:
+            raise ToolError(f"{json.dumps(event.title)} has already started.")
+        if event.start - timedelta(minutes=minutes) <= now:
+            left = _whole_minutes(event.start - now)
+            raise ToolError(f"{json.dumps(event.title)} starts in {left} min, which is sooner than {minutes} min. "
+                            "Offer a shorter reminder.")
+        reminder = repo.add(user.id, event.id, event.start, minutes)
+        return {"ok": True, "reminder_id": reminder.id, **self._reminder_summary(reminder, event.title, tz)}
+
+    def list_reminders(self, user: User, args: dict) -> dict:
+        tz = ZoneInfo(user.timezone)
+        pending = self._reminder_repo().list_pending(user.id)
+        titles = self._event_titles(user, pending, tz)
+        return {
+            "default_minutes_before_every_event": user.default_reminder_minutes,
+            "reminders": [{"reminder_id": r.id, **self._reminder_summary(r, titles.get(r.event_id), tz)}
+                          for r in pending],
+        }
+
+    def cancel_reminder(self, user: User, args: dict) -> dict:
+        repo = self._reminder_repo()
+        reminder_id = args.get("reminder_id")
+        if str(reminder_id).strip().lower() == "all":
+            return {"ok": True, "cancelled": repo.cancel_all(user.id)}
+        parsed = _parse_positive_id(reminder_id, 'reminder_id must be an id from list_reminders, or "all".')
+        if not repo.cancel(user.id, parsed):
+            raise ToolError(f"No upcoming reminder with id {parsed}. Call list_reminders to see them.")
+        return {"ok": True, "cancelled": 1, "reminder_id": parsed}
+
+    def _reminder_summary(self, reminder: Any, title: str | None, tz: ZoneInfo) -> dict:
+        start, remind_at = reminder.event_start.astimezone(tz), reminder.remind_at.astimezone(tz)
+        return {
+            "event_id": reminder.event_id,
+            "event_title": title,
+            "event_date": calendar_service.display_date(start),
+            "event_time": calendar_service.display_time(start),
+            "minutes_before": reminder.minutes_before,
+            "remind_at": f"{calendar_service.display_date(remind_at)} {calendar_service.display_time(remind_at)}",
+            "automatic": reminder.is_default,
+        }
+
+    def _event_titles(self, user: User, reminders: list, tz: ZoneInfo) -> dict[str, str]:
+        """Event titles for a reminder list, from one calendar read. Empty if the calendar can't be read."""
+        if not reminders:
+            return {}
+        first = min(r.event_start for r in reminders).astimezone(tz).date()
+        last = min(max(r.event_start for r in reminders).astimezone(tz).date(),
+                   first + timedelta(days=calendar_service.MAX_RANGE_DAYS - 1))
+        try:
+            events = calendar_service.get_events(self._calendar_source(user), first, last, tz)
+        except (HttpError, ToolError):
+            return {}
+        return {e.id: e.title for e in events}
+
+    def _reminder_repo(self) -> ReminderRepo:
+        if self._reminders is None:
+            raise ToolError("Reminders aren't set up on this assistant yet.")
+        return self._reminders
+
     def find_places(self, user: User, args: dict) -> dict:
         if self._places is None:
             raise ToolError("Place search isn't set up on this assistant yet.")
@@ -418,6 +507,17 @@ class ToolService:
                 user, "To add, change, or delete events, the assistant needs permission to edit their Google "
                       "Calendar (they connected it with read-only access)."))
         return creds
+
+
+def _defang(value: Any) -> Any:
+    """Breaks up "MEDIA:" in tool output: Hermes treats MEDIA:<path> in a reply as "attach this local file"."""
+    if isinstance(value, str):
+        return MEDIA_DIRECTIVE.sub("media ", value)
+    if isinstance(value, dict):
+        return {key: _defang(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_defang(item) for item in value]
+    return value
 
 
 def _memory_lines(memories: list[Memory]) -> list[str]:

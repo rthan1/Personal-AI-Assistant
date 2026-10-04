@@ -26,6 +26,7 @@ class Settings:
     bridge_port: int
     photon_project_id: str | None
     photon_project_secret: str | None
+    hermes_cmd: Path | None = None
 
 
 def _hermes_home() -> Path:
@@ -63,4 +64,5 @@ def load_settings() -> Settings:
         bridge_port=int(os.getenv("BRIDGE_PORT", "8788")),
         photon_project_id=photon_project_id,
         photon_project_secret=photon_project_secret,
+        hermes_cmd=Path(os.getenv("HERMES_CMD") or _hermes_home() / "bin" / "hermes.cmd"),
     )

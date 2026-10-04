@@ -44,10 +44,12 @@ TOOLS = [
         "set_preference",
         "Save one user preference.",
         {
-            "key": {"type": "string", "enum": ["home_address", "travel_mode", "buffer_minutes", "timezone", "name"]},
+            "key": {"type": "string", "enum": ["home_address", "travel_mode", "buffer_minutes", "timezone", "name",
+                                               "default_reminder_minutes"]},
             "value": {
                 "type": ["string", "number"],
-                "description": "travel_mode: drive|transit|walk|bicycle; buffer_minutes: 0-120",
+                "description": "travel_mode: drive|transit|walk|bicycle; buffer_minutes: 0-120; "
+                               "default_reminder_minutes: 1-1440 for a reminder before every event, or 0 for off",
             },
         },
         required=("key", "value"),
@@ -141,6 +143,26 @@ TOOLS = [
             "max_price": {"type": "integer", "description": "Optional price cap, 1 ($) to 4 ($$$$)"},
         },
         required=("query",),
+    ),
+    _schema(
+        "set_reminder",
+        "Text the user a reminder a set number of minutes before one of their calendar events (timed events only). "
+        "The reminder follows the event if it moves and is skipped if it's cancelled.",
+        {
+            "event_id": {"type": "string", "description": "Event id from get_events"},
+            "minutes_before": {"type": "integer", "description": "Minutes before the event starts, 1-1440"},
+        },
+        required=("event_id", "minutes_before"),
+    ),
+    _schema(
+        "list_reminders",
+        "List the user's upcoming reminders (ones they asked for and automatic ones) with their ids.",
+    ),
+    _schema(
+        "cancel_reminder",
+        "Cancel one upcoming reminder by id (from list_reminders), or all of them with \"all\".",
+        {"reminder_id": {"type": ["integer", "string"], "description": "Reminder id, e.g. 4, or \"all\""}},
+        required=("reminder_id",),
     ),
 ]
 

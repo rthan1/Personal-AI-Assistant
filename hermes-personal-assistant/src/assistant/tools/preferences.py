@@ -6,8 +6,9 @@ TRAVEL_MODES = ("drive", "transit", "walk", "bicycle")
 MAX_BUFFER_MINUTES = 120
 MAX_ADDRESS_LENGTH = 300
 MAX_NAME_LENGTH = 80
+MAX_REMINDER_MINUTES = 1440
 
-SETTABLE_PREFERENCES = ("home_address", "travel_mode", "buffer_minutes", "timezone", "name")
+SETTABLE_PREFERENCES = ("home_address", "travel_mode", "buffer_minutes", "timezone", "name", "default_reminder_minutes")
 
 
 def normalize_phone(raw: str) -> str:
@@ -36,6 +37,13 @@ def parse_whole_number(value: Any, error: str) -> int:
     return int(number)
 
 
+def validate_reminder_minutes(value: Any, field: str = "minutes_before") -> int:
+    minutes = parse_whole_number(value, f"{field} must be a whole number of minutes.")
+    if not 1 <= minutes <= MAX_REMINDER_MINUTES:
+        raise ValueError(f"{field} must be between 1 and {MAX_REMINDER_MINUTES} (24 hours).")
+    return minutes
+
+
 def validate_preference(key: str, value: Any) -> Any:
     if key not in SETTABLE_PREFERENCES:
         raise ValueError(f"Unknown preference {key!r}. Allowed: {', '.join(SETTABLE_PREFERENCES)}.")
@@ -53,6 +61,14 @@ def validate_preference(key: str, value: Any) -> Any:
         if not 0 <= minutes <= MAX_BUFFER_MINUTES:
             raise ValueError(f"buffer_minutes must be between 0 and {MAX_BUFFER_MINUTES}.")
         return minutes
+
+    if key == "default_reminder_minutes":
+        if value is None or value is False or str(value).strip().lower() in {"", "off", "none", "no", "false"}:
+            return None
+        minutes = parse_whole_number(value, 'default_reminder_minutes must be a whole number of minutes, or 0/"off".')
+        if minutes == 0:
+            return None
+        return validate_reminder_minutes(minutes, "default_reminder_minutes")
 
     if key == "timezone":
         tz = str(value).strip()

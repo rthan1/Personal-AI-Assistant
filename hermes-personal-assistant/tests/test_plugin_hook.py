@@ -51,6 +51,11 @@ def test_hook_fails_open_when_bridge_is_down(plugin, monkeypatch):
     ("forget", {"memory_id": 3}),
     ("forget", {"memory_id": "all"}),
     ("plan_departure", {"origin": "home", "event_id": "abc"}),
+    ("set_reminder", {"event_id": "abc", "minutes_before": 30}),
+    ("set_reminder", {"event_id": "abc", "minutes_before": 30.0}),
+    ("cancel_reminder", {"reminder_id": 2}),
+    ("cancel_reminder", {"reminder_id": "all"}),
+    ("set_preference", {"key": "default_reminder_minutes", "value": 15}),
     ("find_places", {"query": "ramen", "near": "Ann Arbor", "max_price": 2, "min_rating": 4.5, "open_now": True}),
     ("find_places", {"query": "bowling", "event_id": "abc", "min_rating": 4}),
 ])
@@ -75,5 +80,6 @@ def test_register_adds_tools_and_hook(plugin):
     ctx = Ctx()
     plugin.register(ctx)
     assert ctx.tools == ["get_current_time", "get_events", "get_preferences", "set_preference", "plan_departure",
-                         "remember", "forget", "create_event", "update_event", "delete_event", "confirm_change", "find_places"]
+                         "remember", "forget", "create_event", "update_event", "delete_event", "confirm_change", "find_places", "set_reminder", "list_reminders",
+                         "cancel_reminder"]
     assert ctx.hooks == ["pre_llm_call"]

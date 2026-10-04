@@ -1,6 +1,6 @@
 name: assistant_bridge
 version: 0.1.0
-description: "Personal assistant tools (calendar viewing and editing, preferences, time, departure planning, per-user memory, nearby places) plus a pre_llm_call hook that adds the sender's account status. Forwards calls with the trusted Photon sender to the local assistant app."
+description: "Personal assistant tools (calendar viewing and editing, preferences, time, departure planning, per-user memory, nearby places, event reminders) plus a pre_llm_call hook that adds the sender's account status. Forwards calls with the trusted Photon sender to the local assistant app."
 author: ethan
 kind: backend
 provides_tools:
@@ -16,3 +16,6 @@ provides_tools:
   - delete_event
   - confirm_change
   - find_places
+  - set_reminder
+  - list_reminders
+  - cancel_reminder
