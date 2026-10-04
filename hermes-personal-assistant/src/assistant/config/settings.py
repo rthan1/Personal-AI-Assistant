@@ -15,7 +15,6 @@ DEFAULT_TIMEZONE = "America/New_York"
 class Settings:
     timezone: str
     google_maps_api_key: str | None
-    google_credentials_path: Path
     google_web_client_path: Path
     db_path: Path
     secret_key: str
@@ -55,7 +54,6 @@ def load_settings() -> Settings:
     return Settings(
         timezone=os.getenv("ASSISTANT_TIMEZONE", DEFAULT_TIMEZONE),
         google_maps_api_key=os.getenv("GOOGLE_MAPS_API_KEY") or None,
-        google_credentials_path=DATA_DIR / "credentials.json",
         google_web_client_path=DATA_DIR / "web_client.json",
         db_path=Path(os.getenv("ASSISTANT_DB_PATH") or DATA_DIR / "assistant.db"),
         secret_key=os.environ["ASSISTANT_SECRET_KEY"],

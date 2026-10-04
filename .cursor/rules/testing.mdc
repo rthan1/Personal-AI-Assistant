@@ -8,21 +8,21 @@ alwaysApply: false
 
 ## Setup
 
-- Use `pytest`. Tests live in `tests/`, mirroring the source layout (e.g. `tests/tools/test_departure_planner.py`).
-- Shared fixtures (fake events, fake clients, temp database) go in `tests/conftest.py`.
+- Use `pytest`. Tests live flat in `hermes-personal-assistant/tests/`, one file per module or feature (e.g. `test_departure_planner.py`). Run from `hermes-personal-assistant`: `.\.venv\Scripts\python.exe -m pytest`.
+- Shared fixtures (in-memory database and repos) go in `tests/conftest.py`.
 
 ## Rules
 
-- No real network calls. Mock Google Calendar, Google Routes, Photon, and Hermes model calls.
+- No real network calls. Use fakes for Google Calendar, Routes, Places, Photon, and `hermes send`.
 - Use an in-memory or temporary SQLite database; never touch the real one.
-- Use fixed, timezone-aware datetimes in tests; never depend on the current time. Freeze time (e.g. `freezegun`) for scheduler tests.
+- Use fixed, timezone-aware datetimes; never depend on the current time. Pass a `now` callable (services and the scheduler accept one) instead of freezing time.
 - One behavior per test; name tests after the behavior: `test_leave_time_includes_buffer`.
 
 ## What to test
 
-- **departure_planner**: pure time math, the highest priority. Cover buffers, events with no location, and timezone edges.
-- **reminders**: create, list, cancel; the dispatcher skips cancelled or moved events and marks reminders sent.
-- **scheduler**: daily briefing builds the right summary for a given day's events.
+- **Pure logic** (`departure_planner`, `calendar_edits`, `preferences`): time math, timezone edges, and validation.
+- **Tools** (`ToolService`): results and errors, plus that one user can't see or change another's data.
+- **Scheduler**: reminders and briefings go to the right user once, skip cancelled or moved events, and retry failures.
 - **API wrappers**: correct request parameters and graceful handling of API errors.
 
 ```python

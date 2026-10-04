@@ -34,7 +34,7 @@ now = datetime.now(timezone.utc)
 
 ## External APIs
 
-- Each external service (Google Calendar, Google Routes, Photon) is wrapped in its own module in `tools/` or `messaging/`; other code calls the wrapper, not the SDK directly.
+- Each external service (Google Calendar, Routes, Places, Photon, `hermes send`) is wrapped in its own module in `tools/` or `messaging/`; other code calls the wrapper, not the SDK directly.
 - Handle API failures explicitly: catch specific exceptions, log context, and return a clear error the agent can relay to the user.
 - Pass clients in as parameters (dependency injection) so they can be mocked in tests.
 
