@@ -9,6 +9,8 @@ from assistant.tools.calendar_edits import (
     clean_location,
     clean_title,
     describe,
+    find_conflicts,
+    free_slots,
     new_event_times,
     parse_local_datetime,
     time_fields,
@@ -151,3 +153,91 @@ class TestDescribe:
     def test_multi_day_all_day(self):
         result = describe("Trip", EventTimes(first_day=date(2026, 10, 6), last_day=date(2026, 10, 8)), None, NY)
         assert (result["date"], result["end_date"]) == ("Tue, Oct 6", "Thu, Oct 8")
+
+
+EARLY_NOW = utc(2026, 10, 1, 12)
+
+
+def local(hhmm, day=6):
+    hour, minute = map(int, hhmm.split(":"))
+    return datetime(2026, 10, day, hour, minute, tzinfo=NY).astimezone(timezone.utc)
+
+
+def busy(id_, start, end, end_day=6):
+    return CalendarEvent(id=id_, title=id_.title(), start=local(start), end=local(end, end_day), all_day=False,
+                         location=None)
+
+
+def span(start, end):
+    return EventTimes(start_at=local(start), end_at=local(end))
+
+
+def starts(slots):
+    return [s.start_at.astimezone(NY).strftime("%H:%M") for s in slots]
+
+
+class TestFindConflicts:
+    def test_partial_overlap(self):
+        assert [e.id for e in find_conflicts(span("14:30", "15:30"), [busy("sync", "15:00", "16:00")])] == ["sync"]
+
+    def test_contained_and_containing(self):
+        events = [busy("inside", "15:15", "15:45"), busy("around", "14:00", "17:00")]
+        assert {e.id for e in find_conflicts(span("15:00", "16:00"), events)} == {"inside", "around"}
+
+    def test_back_to_back_is_not_a_conflict(self):
+        events = [busy("before", "14:00", "15:00"), busy("after", "16:00", "17:00")]
+        assert find_conflicts(span("15:00", "16:00"), events) == []
+
+    def test_all_day_events_are_ignored(self):
+        trip = all_day_event(local("00:00"), local("00:00", 7))
+        assert find_conflicts(span("15:00", "16:00"), [trip]) == []
+
+    def test_new_all_day_event_has_no_conflicts(self):
+        times = EventTimes(first_day=date(2026, 10, 6), last_day=date(2026, 10, 6))
+        assert find_conflicts(times, [busy("sync", "15:00", "16:00")]) == []
+
+    def test_event_being_moved_ignores_itself(self):
+        assert find_conflicts(span("15:30", "16:30"), [busy("self", "15:00", "16:00")], ignore_event_id="self") == []
+
+    def test_event_running_past_midnight(self):
+        late = busy("party", "22:00", "01:00", end_day=7)
+        times = EventTimes(start_at=local("00:30", 7), end_at=local("01:30", 7))
+        assert [e.id for e in find_conflicts(times, [late])] == ["party"]
+
+
+class TestFreeSlots:
+    def test_nearest_slot_before_and_after(self):
+        events = [busy("a", "13:00", "14:00"), busy("sync", "15:00", "16:00"), busy("b", "16:30", "18:00")]
+        assert starts(free_slots(span("15:00", "16:00"), events, NY, EARLY_NOW)) == ["14:00", "18:00"]
+
+    def test_slot_starts_right_when_an_event_ends(self):
+        events = [busy("a", "14:00", "15:00"), busy("sync", "15:00", "15:50")]
+        assert starts(free_slots(span("15:00", "15:30"), events, NY, EARLY_NOW)) == ["13:30", "15:50"]
+
+    def test_slots_keep_the_same_length(self):
+        slots = free_slots(span("15:00", "16:30"), [busy("sync", "15:00", "16:00")], NY, EARLY_NOW)
+        assert all(s.end_at - s.start_at == local("16:30") - local("15:00") for s in slots)
+        assert starts(slots) == ["13:30", "16:00"]
+
+    def test_slots_stay_within_the_day(self):
+        events = [busy("morning", "07:00", "09:00"), busy("evening", "20:00", "22:00")]
+        assert starts(free_slots(span("07:30", "08:30"), events, NY, EARLY_NOW)) == ["09:00"]
+        assert starts(free_slots(span("21:00", "22:00"), events, NY, EARLY_NOW)) == ["19:00"]
+
+    def test_no_slots_in_the_past(self):
+        now = local("14:10")
+        slots = free_slots(span("15:00", "16:00"), [busy("sync", "15:00", "16:00")], NY, now)
+        assert starts(slots) == ["16:00"]
+
+    def test_fully_booked_day_has_no_slots(self):
+        assert free_slots(span("12:00", "13:00"), [busy("all", "06:00", "23:00")], NY, EARLY_NOW) == []
+
+    def test_moved_event_does_not_block_its_own_slot(self):
+        events = [busy("self", "10:00", "11:00"), busy("sync", "15:00", "16:00")]
+        slots = free_slots(span("15:00", "16:00"), events, NY, EARLY_NOW, ignore_event_id="self")
+        assert starts(slots) == ["14:00", "16:00"]
+
+    def test_all_day_events_do_not_block_slots(self):
+        trip = all_day_event(local("00:00"), local("00:00", 7))
+        slots = free_slots(span("15:00", "16:00"), [trip, busy("sync", "15:00", "16:00")], NY, EARLY_NOW)
+        assert starts(slots) == ["14:00", "16:00"]

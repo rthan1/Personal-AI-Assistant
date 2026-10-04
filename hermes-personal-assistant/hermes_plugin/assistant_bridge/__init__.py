@@ -94,7 +94,8 @@ TOOLS = [
     _schema(
         "create_event",
         "Propose adding an event to the user's Google Calendar. Saves nothing: returns a pending_change_id to "
-        "confirm with confirm_change after the user says yes. Guests can't be added.",
+        "confirm with confirm_change after the user says yes. Guests can't be added. Also returns any events it "
+        "overlaps (conflicts) and the nearest free slots of the same length (free_slots).",
         {
             "title": {"type": "string"},
             "start": {"type": "string", "description": "Local YYYY-MM-DDTHH:MM, or YYYY-MM-DD when all_day"},
@@ -108,7 +109,8 @@ TOOLS = [
     _schema(
         "update_event",
         "Propose changing an event (id from get_events). Only pass what changes; moving the start keeps its length. "
-        "Saves nothing: returns a pending_change_id to confirm with confirm_change after the user says yes.",
+        "Saves nothing: returns a pending_change_id to confirm with confirm_change after the user says yes. When "
+        "the time changes, also returns overlapping events (conflicts) and the nearest free slots (free_slots).",
         {
             "event_id": {"type": "string"},
             "title": {"type": "string", "description": "Optional new title"},

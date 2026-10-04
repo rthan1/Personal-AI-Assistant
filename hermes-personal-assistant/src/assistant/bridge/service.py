@@ -20,6 +20,8 @@ from assistant.tools.google_auth import GoogleAuthError, can_edit_calendar, cred
 CalendarSourceFactory = Callable[[Any], calendar_service.EventSource]
 MAX_MEMORY_CONTEXT_CHARS = 2000
 MAX_PLACE_RESULTS = 3
+MAX_CONFLICTS_SHOWN = 3
+MAX_CONFLICT_TITLE_LENGTH = 100
 MAX_PLACE_QUERY_LENGTH = 100
 PLACE_SEARCH_RADIUS_M = {"walk": 3_000, "bicycle": 8_000, "transit": 8_000, "drive": 15_000}
 PRICE_SYMBOLS = {0: "free", 1: "$", 2: "$$", 3: "$$$", 4: "$$$$"}
@@ -204,7 +206,8 @@ class ToolService:
         body = {"summary": title, **calendar_edits.time_fields(times, tz)}
         if location:
             body["location"] = location
-        return self._propose(user, "create", {"body": body}, calendar_edits.describe(title, times, location, tz))
+        return self._propose(user, "create", {"body": body}, calendar_edits.describe(title, times, location, tz),
+                             self._overlaps(user, times, tz))
 
     def update_event(self, user: User, args: dict) -> dict:
         tz = ZoneInfo(user.timezone)
@@ -225,7 +228,8 @@ class ToolService:
             "before": calendar_edits.describe_event(event, tz),
             "after": calendar_edits.describe(title, times or calendar_edits.event_times(event, tz), location, tz),
         }
-        return self._propose(user, "update", {"event_id": event.id, "body": body}, summary)
+        overlaps = self._overlaps(user, times, tz, ignore_event_id=event.id) if times is not None else {}
+        return self._propose(user, "update", {"event_id": event.id, "body": body}, summary, overlaps)
 
     def delete_event(self, user: User, args: dict) -> dict:
         tz = ZoneInfo(user.timezone)
@@ -259,15 +263,44 @@ class ToolService:
             result["event"] = calendar_service.format_event(event, tz)
         return result
 
-    def _propose(self, user: User, action: str, payload: dict, summary: dict) -> dict:
+    def _propose(self, user: User, action: str, payload: dict, summary: dict, overlaps: dict | None = None) -> dict:
         change = self._pending_repo().create(user.id, action, {**payload, "summary": summary})
+        overlaps = overlaps or {}
+        if overlaps.get("conflicts"):
+            next_step = ("Nothing is saved yet. This overlaps the events in conflicts. Tell the user what it overlaps, "
+                         "offer the free_slots as alternatives (to use one, call this tool again with that start), "
+                         "and ask whether they want it anyway or at another time. Only after they reply yes to this "
+                         "exact change, call confirm_change with this pending_change_id.")
+        else:
+            next_step = ("Nothing is saved yet. Tell the user exactly what will change and ask them to confirm. "
+                         "Only after they reply yes, call confirm_change with this pending_change_id.")
         return {
             "pending_change_id": change.id,
             "action": action,
             "change": summary,
+            **overlaps,
             "saved": False,
-            "next_step": "Nothing is saved yet. Tell the user exactly what will change and ask them to confirm. "
-                         "Only after they reply yes, call confirm_change with this pending_change_id.",
+            "next_step": next_step,
+        }
+
+    def _overlaps(self, user: User, times: calendar_edits.EventTimes, tz: ZoneInfo,
+                  ignore_event_id: str | None = None) -> dict:
+        """Events a timed change would overlap, plus the nearest free slots. Never blocks the proposal."""
+        if times.all_day:
+            return {}
+        try:
+            events = calendar_service.get_events(self._calendar_source(user), times.start_at.astimezone(tz).date(),
+                                                 times.end_at.astimezone(tz).date(), tz)
+        except (HttpError, ToolError):
+            return {"conflicts_checked": False}
+        conflicts = calendar_edits.find_conflicts(times, events, ignore_event_id)
+        if not conflicts:
+            return {"conflicts": []}
+        slots = calendar_edits.free_slots(times, events, tz, self._now(), ignore_event_id)
+        return {
+            "conflicts": [_conflict_summary(e, tz) for e in conflicts[:MAX_CONFLICTS_SHOWN]],
+            "more_conflicts": max(0, len(conflicts) - MAX_CONFLICTS_SHOWN),
+            "free_slots": [_free_slot_summary(slot, tz) for slot in slots],
         }
 
     def _event_to_change(self, user: User, event_id: Any, tz: ZoneInfo) -> calendar_service.CalendarEvent:
@@ -700,6 +733,27 @@ def _place_summary(place: places_service.Place, center: places_service.LatLng) -
 
 def _whole_minutes(duration: timedelta) -> int:
     return math.ceil(duration.total_seconds() / 60)
+
+
+def _conflict_summary(event: calendar_service.CalendarEvent, tz: ZoneInfo) -> dict:
+    start, end = event.start.astimezone(tz), event.end.astimezone(tz)
+    return {
+        "event_id": event.id,
+        "title": event.title[:MAX_CONFLICT_TITLE_LENGTH],
+        "date": calendar_service.display_date(start),
+        "start_time": calendar_service.display_time(start),
+        "end_time": calendar_service.display_time(end),
+    }
+
+
+def _free_slot_summary(slot: calendar_edits.EventTimes, tz: ZoneInfo) -> dict:
+    start, end = slot.start_at.astimezone(tz), slot.end_at.astimezone(tz)
+    return {
+        "start": start.strftime("%Y-%m-%dT%H:%M"),
+        "date": calendar_service.display_date(start),
+        "start_time": calendar_service.display_time(start),
+        "end_time": calendar_service.display_time(end),
+    }
 
 
 def _display_clock(hhmm: str) -> str:

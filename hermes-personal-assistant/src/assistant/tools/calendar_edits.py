@@ -1,7 +1,7 @@
 """Validation, Google request bodies, and summaries for creating and changing events. Pure: no I/O."""
 
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -12,6 +12,9 @@ MAX_TITLE_LENGTH = 200
 DEFAULT_DURATION_MINUTES = 60
 MAX_TIMED_DURATION = timedelta(days=14)
 MAX_ALL_DAY_DAYS = 31
+FREE_SLOT_DAY_START = time(7, 0)
+FREE_SLOT_DAY_END = time(22, 0)
+FREE_SLOT_STEP = timedelta(minutes=15)
 
 
 @dataclass(frozen=True)
@@ -180,3 +183,49 @@ def describe(title: str, times: EventTimes, location: str | None, tz: ZoneInfo) 
 
 def describe_event(event: CalendarEvent, tz: ZoneInfo) -> dict[str, Any]:
     return describe(event.title, event_times(event, tz), event.location, tz)
+
+
+def _busy(events: list[CalendarEvent], ignore_event_id: str | None) -> list[CalendarEvent]:
+    """Events that block time. All-day events (trips, birthdays) would clash with everything, so they don't."""
+    return [e for e in events if not e.all_day and e.id != ignore_event_id]
+
+
+def find_conflicts(times: EventTimes, events: list[CalendarEvent],
+                   ignore_event_id: str | None = None) -> list[CalendarEvent]:
+    """Timed events that overlap a timed span. Back-to-back events (one ends as the other starts) don't."""
+    if times.all_day:
+        return []
+    return [e for e in _busy(events, ignore_event_id) if e.start < times.end_at and times.start_at < e.end]
+
+
+def free_slots(times: EventTimes, events: list[CalendarEvent], tz: ZoneInfo, now: datetime,
+               ignore_event_id: str | None = None) -> list[EventTimes]:
+    """The closest free slots of the same length on the same local day: at most one before and one after.
+
+    Slots stay within FREE_SLOT_DAY_START..FREE_SLOT_DAY_END local time, start in the future, and start on a
+    quarter hour or right when a busy event ends.
+    """
+    if times.all_day:
+        return []
+    length = times.end_at - times.start_at
+    day = times.start_at.astimezone(tz).date()
+    window_start = datetime.combine(day, FREE_SLOT_DAY_START, tz).astimezone(timezone.utc)
+    window_end = datetime.combine(day, FREE_SLOT_DAY_END, tz).astimezone(timezone.utc)
+    if length > window_end - window_start:
+        return []
+    busy = _busy(events, ignore_event_id)
+
+    candidates = {window_start + i * FREE_SLOT_STEP for i in range((window_end - window_start) // FREE_SLOT_STEP + 1)}
+    candidates.update(e.end for e in busy)
+    candidates.update(e.start - length for e in busy)
+
+    def is_free(start: datetime) -> bool:
+        end = start + length
+        return (window_start <= start and end <= window_end and start > now and start != times.start_at
+                and not any(e.start < end and start < e.end for e in busy))
+
+    free = sorted(start for start in candidates if is_free(start))
+    before = [s for s in free if s < times.start_at]
+    after = [s for s in free if s > times.start_at]
+    picks = ([before[-1]] if before else []) + ([after[0]] if after else [])
+    return [EventTimes(start_at=s, end_at=s + length) for s in picks]
