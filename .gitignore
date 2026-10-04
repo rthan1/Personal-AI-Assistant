@@ -15,6 +15,7 @@ venv/
 # Python cache
 __pycache__/
 *.py[cod]
+.pytest_cache/
 
 # Credentials / tokens
 token.json
