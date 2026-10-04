@@ -27,6 +27,8 @@ class Settings:
     photon_project_id: str | None
     photon_project_secret: str | None
     hermes_cmd: Path | None = None
+    contact_email: str | None = None
+    google_site_verification: str | None = None
 
 
 def _hermes_home() -> Path:
@@ -65,4 +67,6 @@ def load_settings() -> Settings:
         photon_project_id=photon_project_id,
         photon_project_secret=photon_project_secret,
         hermes_cmd=Path(os.getenv("HERMES_CMD") or _hermes_home() / "bin" / "hermes.cmd"),
+        contact_email=os.getenv("CONTACT_EMAIL") or None,
+        google_site_verification=os.getenv("GOOGLE_SITE_VERIFICATION") or None,
     )

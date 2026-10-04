@@ -51,6 +51,53 @@ def test_home_page_links_to_bot(client):
     assert "sms:+15550100000" in response.text
 
 
+@pytest.mark.parametrize("path, heading", [("/privacy", "Privacy policy"), ("/terms", "Terms of service")])
+def test_policy_pages_are_public(client, path, heading):
+    response = client.get(path)
+    assert response.status_code == 200 and f"<h1>{heading}</h1>" in response.text
+
+
+def test_privacy_policy_has_google_limited_use_statement(client):
+    text = client.get("/privacy").text
+    assert "Limited Use" in text and "api-services-user-data-policy" in text
+
+
+def test_every_page_links_to_policies(client):
+    text = client.get("/").text
+    assert "href='/privacy'" in text and "href='/terms'" in text
+
+
+def test_policy_pages_show_escaped_contact_email(repo, google):
+    app = create_web_app(repo, BASE_URL, "+1 555-010-0000", "America/New_York", google.start, google.finish,
+                         contact_email="me@example.test<b>")
+    text = TestClient(app).get("/privacy").text
+    assert "mailto:me@example.test&lt;b&gt;" in text and "<b>'" not in text
+
+
+def test_policy_pages_without_contact_email(client):
+    assert "developer email shown on the Google sign-in screen" in client.get("/terms").text
+
+
+def test_serves_google_site_verification_file(repo, google):
+    app = create_web_app(repo, BASE_URL, "+1 555-010-0000", "America/New_York", google.start, google.finish,
+                         google_site_verification="google1234abcd5678.html")
+    response = TestClient(app).get("/google1234abcd5678.html")
+    assert response.status_code == 200
+    assert response.text == "google-site-verification: google1234abcd5678.html"
+
+
+def test_no_verification_file_unless_configured(client):
+    assert client.get("/google1234abcd5678.html").status_code == 404
+
+
+def test_malformed_verification_name_is_ignored_not_fatal(repo, google):
+    app = create_web_app(repo, BASE_URL, "+1 555-010-0000", "America/New_York", google.start, google.finish,
+                         google_site_verification="../secret")
+    client = TestClient(app)
+    assert client.get("/").status_code == 200
+    assert client.get("/../secret.html").status_code == 404
+
+
 class FakePhoton:
     def __init__(self, number="+15550199999", fail=False):
         self.number, self.fail, self.registered = number, fail, []

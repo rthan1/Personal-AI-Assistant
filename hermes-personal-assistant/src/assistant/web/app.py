@@ -18,7 +18,7 @@ from typing import Callable
 from zoneinfo import available_timezones
 
 from fastapi import FastAPI, Form, Query
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 
 from assistant.messaging.photon_users import PhotonError
 from assistant.storage.users import User, UserRepo
@@ -39,7 +39,11 @@ input,select{width:100%;padding:10px;margin-top:6px;font-size:1em;border:1px sol
 .btn{display:inline-block;margin-top:24px;padding:12px 20px;background:#0a84ff;color:#fff;border:0;border-radius:12px;
 font-size:1em;text-decoration:none;cursor:pointer}.hint{color:#666;font-size:.9em;font-weight:400}
 .error{background:#fde8e8;color:#9b1c1c;padding:10px 14px;border-radius:10px}
+footer{margin-top:48px;color:#666;font-size:.85em}footer a{color:#666}h2{font-size:1.15em;margin-top:28px}
 """
+FOOTER = "<footer><a href='/privacy'>Privacy policy</a> · <a href='/terms'>Terms of service</a></footer>"
+POLICY_DATE = "October 4, 2026"
+SITE_VERIFICATION_NAME = re.compile(r"google[0-9a-f]{8,32}")
 
 
 def _page(title: str, body: str, status: int = 200) -> HTMLResponse:
@@ -47,13 +51,74 @@ def _page(title: str, body: str, status: int = 200) -> HTMLResponse:
         "<!doctype html><html><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
         f"<meta name='referrer' content='no-referrer'><title>{escape(title)}</title><style>{STYLE}</style></head>"
-        f"<body>{body}</body></html>"
+        f"<body>{body}{FOOTER}</body></html>"
     )
     return HTMLResponse(html, status_code=status, headers={"Cache-Control": "no-store"})
 
 
 def _sms_link(bot_phone: str) -> str:
     return "sms:+" + re.sub(r"\D", "", bot_phone)
+
+
+def _contact(contact_email: str | None) -> str:
+    if contact_email:
+        return f"<a href='mailto:{escape(contact_email)}'>{escape(contact_email)}</a>"
+    return "the developer email shown on the Google sign-in screen"
+
+
+def _privacy_body(contact: str) -> str:
+    return f"""<h1>Privacy policy</h1>
+<p class="hint">Last updated {POLICY_DATE}</p>
+<p>This assistant is a personal project built for a hackathon. You text it over iMessage to ask about your
+Google Calendar, travel times, places nearby, and reminders. This page explains what it stores and who sees it.</p>
+<h2>What we store</h2>
+<ul>
+  <li>Your phone number, name, timezone, and the settings you choose (home address, travel mode, buffer
+  minutes, reminder and daily briefing times).</li>
+  <li>Your Google sign-in token, encrypted, so the assistant can reach your calendar.</li>
+  <li>Notes you ask the assistant to remember, encrypted.</li>
+  <li>Reminders you set: the event's id and times, not its title or details.</li>
+  <li>Recent conversation history, so the assistant can follow the conversation.</li>
+</ul>
+<h2>Google Calendar data</h2>
+<p>The assistant reads your primary calendar only when you ask something that needs it (or to send reminders
+and briefings you turned on). It adds, changes, or deletes events only after you confirm in a message. Calendar
+data isn't stored beyond what's listed above, and it is never sold, shared for advertising, or used to train
+AI models.</p>
+<p>The assistant's use and transfer of information received from Google APIs adheres to the
+<a href="https://developers.google.com/terms/api-services-user-data-policy">Google API Services User Data
+Policy</a>, including the Limited Use requirements.</p>
+<h2>Services that process your data</h2>
+<ul>
+  <li><b>Photon</b> delivers iMessages between you and the assistant.</li>
+  <li><b>An AI model provider (Nous Research)</b> reads your messages, and the calendar details needed to
+  answer them, to write replies.</li>
+  <li><b>Google Maps</b> receives addresses only when you ask about travel time or places.</li>
+</ul>
+<h2>Your choices</h2>
+<ul>
+  <li>Change your settings or turn off reminders and briefings by texting the assistant.</li>
+  <li>Revoke calendar access anytime at
+  <a href="https://myaccount.google.com/permissions">myaccount.google.com/permissions</a>.</li>
+  <li>To delete your account and all data stored about you, contact {contact}.</li>
+</ul>
+<h2>Contact</h2>
+<p>Questions: {contact}.</p>"""
+
+
+def _terms_body(contact: str) -> str:
+    return f"""<h1>Terms of service</h1>
+<p class="hint">Last updated {POLICY_DATE}</p>
+<p>This assistant is a free hackathon project. By signing up you agree to these terms.</p>
+<ul>
+  <li>It is provided "as is", without warranties. It can be wrong about times, travel, or places, so
+  double-check anything important.</li>
+  <li>You are responsible for changes you confirm to your calendar.</li>
+  <li>Use it only for your own phone number and calendar, and don't try to misuse, overload, or break it.</li>
+  <li>The service may change, pause, or shut down at any time, and accounts may be removed.</li>
+  <li>Your data is handled as described in the <a href="/privacy">privacy policy</a>.</li>
+</ul>
+<p>Questions: {contact}.</p>"""
 
 
 class RateLimiter:
@@ -82,6 +147,8 @@ def create_web_app(
     finish_google_login: FinishLogin,
     register_phone: RegisterPhone | None = None,
     registration_limiter: RateLimiter | None = None,
+    contact_email: str | None = None,
+    google_site_verification: str | None = None,
 ) -> FastAPI:
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     lock = threading.Lock()
@@ -158,6 +225,23 @@ def create_web_app(
     @app.get("/", response_class=HTMLResponse)
     def home() -> HTMLResponse:
         return landing()
+
+    @app.get("/privacy", response_class=HTMLResponse)
+    def privacy() -> HTMLResponse:
+        return _page("Privacy policy", _privacy_body(_contact(contact_email)))
+
+    @app.get("/terms", response_class=HTMLResponse)
+    def terms() -> HTMLResponse:
+        return _page("Terms of service", _terms_body(_contact(contact_email)))
+
+    filename = (google_site_verification or "").strip().removesuffix(".html")
+    if filename and not SITE_VERIFICATION_NAME.fullmatch(filename):
+        log.warning("Ignoring GOOGLE_SITE_VERIFICATION: it should look like google1234abcd.html")
+    elif filename:
+        # Search Console's "HTML file" check for a URL-prefix property: proves we own this domain.
+        @app.get(f"/{filename}.html", response_class=PlainTextResponse)
+        def google_site_verification_file() -> str:
+            return f"google-site-verification: {filename}.html"
 
     @app.get("/start")
     def start_page() -> RedirectResponse:

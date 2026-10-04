@@ -59,6 +59,8 @@ def build_servers(settings: Settings) -> list[uvicorn.Server]:
         start_google_login=partial(google_auth.authorization_url, settings.google_web_client_path),
         finish_google_login=partial(google_auth.exchange_code, settings.google_web_client_path),
         register_phone=photon.register if photon else None,
+        contact_email=settings.contact_email,
+        google_site_verification=settings.google_site_verification,
     )
     # Only this port is exposed through ngrok; ngrok reaches it on localhost.
     web = uvicorn.Config(site, host="127.0.0.1", port=settings.web_port, log_level="info")
