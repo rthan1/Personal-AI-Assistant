@@ -4,11 +4,22 @@ from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
-SINGLE_EVENT_FIELDS = "id,status,summary,start,end,location,recurrence"
-EVENT_FIELDS = f"items({SINGLE_EVENT_FIELDS}),nextPageToken"
+BASE_EVENT_FIELDS = "id,status,summary,start,end,location,recurrence"
+# Guest display names are left out: they're free text anyone can set and would reach the model.
+SINGLE_EVENT_FIELDS = f"{BASE_EVENT_FIELDS},attendees(email,responseStatus,optional,resource,self),organizer(self)"
+EVENT_FIELDS = f"items({BASE_EVENT_FIELDS}),nextPageToken"
 MAX_RANGE_DAYS = 31
 MAX_EVENT_ID_LENGTH = 1024
 ONLINE_LOCATION = re.compile(r"https?://|zoom\.us|meet\.google\.com|teams\.microsoft\.com|webex\.com", re.I)
+
+
+@dataclass(frozen=True)
+class Attendee:
+    email: str
+    response_status: str = "needsAction"
+    optional: bool = False
+    resource: bool = False  # a meeting room
+    is_self: bool = False
 
 
 @dataclass(frozen=True)
@@ -20,6 +31,9 @@ class CalendarEvent:
     all_day: bool
     location: str | None
     recurring_series: bool = False  # the series itself, not one occurrence
+    # Only filled for single-event reads (get_event), not for get_events lists.
+    attendees: tuple[Attendee, ...] = ()
+    is_organizer: bool = False
 
 
 class EventSource(Protocol):
@@ -27,9 +41,9 @@ class EventSource(Protocol):
 
     def get_event(self, event_id: str) -> dict[str, Any]: ...
 
-    def insert_event(self, body: dict[str, Any]) -> dict[str, Any]: ...
+    def insert_event(self, body: dict[str, Any], send_updates: str = "none") -> dict[str, Any]: ...
 
-    def patch_event(self, event_id: str, body: dict[str, Any]) -> dict[str, Any]: ...
+    def patch_event(self, event_id: str, body: dict[str, Any], send_updates: str = "none") -> dict[str, Any]: ...
 
     def delete_event(self, event_id: str) -> None: ...
 
@@ -64,18 +78,18 @@ class GoogleCalendarSource:
             .execute()
         )
 
-    # sendUpdates="none": guests never get emails from the assistant.
-    def insert_event(self, body: dict[str, Any]) -> dict[str, Any]:
+    # sendUpdates defaults to "none": guests only get emails for invites the user confirmed.
+    def insert_event(self, body: dict[str, Any], send_updates: str = "none") -> dict[str, Any]:
         return (
             self._service.events()
-            .insert(calendarId=self._calendar_id, body=body, sendUpdates="none", fields=SINGLE_EVENT_FIELDS)
+            .insert(calendarId=self._calendar_id, body=body, sendUpdates=send_updates, fields=SINGLE_EVENT_FIELDS)
             .execute()
         )
 
-    def patch_event(self, event_id: str, body: dict[str, Any]) -> dict[str, Any]:
+    def patch_event(self, event_id: str, body: dict[str, Any], send_updates: str = "none") -> dict[str, Any]:
         return (
             self._service.events()
-            .patch(calendarId=self._calendar_id, eventId=event_id, body=body, sendUpdates="none",
+            .patch(calendarId=self._calendar_id, eventId=event_id, body=body, sendUpdates=send_updates,
                    fields=SINGLE_EVENT_FIELDS)
             .execute()
         )
@@ -124,6 +138,18 @@ def parse_event(raw: dict[str, Any], tz: ZoneInfo) -> CalendarEvent | None:
         all_day=all_day,
         location=(raw.get("location") or "").strip() or None,
         recurring_series=bool(raw.get("recurrence")),
+        attendees=tuple(_parse_attendee(a) for a in raw.get("attendees") or [] if a.get("email")),
+        is_organizer=bool((raw.get("organizer") or {}).get("self")),
+    )
+
+
+def _parse_attendee(raw: dict[str, Any]) -> Attendee:
+    return Attendee(
+        email=raw["email"],
+        response_status=raw.get("responseStatus") or "needsAction",
+        optional=bool(raw.get("optional")),
+        resource=bool(raw.get("resource")),
+        is_self=bool(raw.get("self")),
     )
 
 

@@ -1,14 +1,21 @@
 """Validation, Google request bodies, and summaries for creating and changing events. Pure: no I/O."""
 
+import json
+import re
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
 from assistant.tools import preferences
-from assistant.tools.calendar_service import CalendarEvent, display_date, display_time
+from assistant.tools.calendar_service import Attendee, CalendarEvent, display_date, display_time
 
 MAX_TITLE_LENGTH = 200
+MAX_GUESTS_PER_CHANGE = 10
+MAX_EMAIL_LENGTH = 254
+MAX_GUEST_NAME_LENGTH = 60
+EMAIL = re.compile(r"[^@\s<>()\[\],;:\"]+@[^@\s<>()\[\],;:\"]+\.[a-z]{2,}")
+NAME_WITH_EMAIL = re.compile(r"(.*?)\s*<([^<>]*)>")
 DEFAULT_DURATION_MINUTES = 60
 MAX_TIMED_DURATION = timedelta(days=14)
 MAX_ALL_DAY_DAYS = 31
@@ -31,6 +38,14 @@ class EventTimes:
         return self.first_day is not None
 
 
+@dataclass(frozen=True)
+class GuestRequest:
+    """One guest as the model passed it: an email, a contact name to look up, or both."""
+
+    name: str | None
+    email: str | None
+
+
 def clean_title(value: Any) -> str:
     text = " ".join(str(value if value is not None else "").split())
     if not text:
@@ -47,6 +62,68 @@ def clean_location(value: Any) -> str | None:
     if len(text) > preferences.MAX_ADDRESS_LENGTH:
         raise ValueError(f"location must be at most {preferences.MAX_ADDRESS_LENGTH} characters.")
     return text
+
+
+def clean_email(value: Any) -> str:
+    text = str(value if value is not None else "").strip().lower()
+    if len(text) > MAX_EMAIL_LENGTH or not EMAIL.fullmatch(text):
+        raise ValueError(f"{json.dumps(text[:MAX_EMAIL_LENGTH])} isn't a valid email address. Ask the user for it.")
+    return text
+
+
+def clean_guest_name(value: Any) -> str:
+    text = " ".join(str(value if value is not None else "").split()).strip('"')
+    if not text:
+        raise ValueError("A guest's name must not be empty.")
+    if len(text) > MAX_GUEST_NAME_LENGTH:
+        raise ValueError(f"A guest's name must be at most {MAX_GUEST_NAME_LENGTH} characters.")
+    return text
+
+
+def parse_guests(value: Any) -> list[GuestRequest]:
+    """Guests from tool args: a list (or comma-separated text) of emails, names, or "Name <email>"."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        items = re.split(r"[,;\n]", value)
+    elif isinstance(value, list):
+        items = value
+    else:
+        raise ValueError("guests must be a list of emails or saved contact names.")
+    guests = []
+    for item in items:
+        text = " ".join(str(item if item is not None else "").split())
+        if not text:
+            continue
+        match = NAME_WITH_EMAIL.fullmatch(text)
+        if match:
+            name = match.group(1).strip().strip('"')
+            guests.append(GuestRequest(clean_guest_name(name) if name else None, clean_email(match.group(2))))
+        elif "@" in text:
+            guests.append(GuestRequest(None, clean_email(text)))
+        else:
+            guests.append(GuestRequest(clean_guest_name(text), None))
+    if len(guests) > MAX_GUESTS_PER_CHANGE:
+        raise ValueError(f"At most {MAX_GUESTS_PER_CHANGE} guests can be invited at once.")
+    return guests
+
+
+def merge_attendees(existing: tuple[Attendee, ...], new_emails: list[str]) -> list[dict[str, Any]]:
+    """The full attendee list for a patch: Google replaces the whole list, so existing guests and their RSVPs stay."""
+    body: list[dict[str, Any]] = []
+    for attendee in existing:
+        entry: dict[str, Any] = {"email": attendee.email, "responseStatus": attendee.response_status}
+        if attendee.optional:
+            entry["optional"] = True
+        if attendee.resource:
+            entry["resource"] = True
+        body.append(entry)
+    known = {a.email.lower() for a in existing}
+    for email in new_emails:
+        if email.lower() not in known:
+            body.append({"email": email})
+            known.add(email.lower())
+    return body
 
 
 def parse_local_datetime(value: Any, tz: ZoneInfo, field: str) -> datetime:

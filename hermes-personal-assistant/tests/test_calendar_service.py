@@ -4,6 +4,8 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from assistant.tools.calendar_service import (
+    Attendee,
+    GoogleCalendarSource,
     day_bounds_utc,
     format_event,
     get_event,
@@ -90,6 +92,26 @@ class TestParseEvent:
         raw = timed("x", "2026-10-03T15:00:00Z", "2026-10-03T16:00:00Z", status="cancelled")
         assert parse_event(raw, NY) is None
 
+    def test_attendees_and_organizer(self):
+        raw = timed("x", "2026-10-03T15:00:00Z", "2026-10-03T16:00:00Z", organizer={"self": True}, attendees=[
+            {"email": "me@x.com", "responseStatus": "accepted", "self": True},
+            {"email": "sam@x.com", "optional": True},
+            {"email": "room@r.com", "resource": True, "responseStatus": "accepted"},
+            {"responseStatus": "accepted"},
+        ])
+        event = parse_event(raw, NY)
+        assert event.is_organizer is True
+        assert event.attendees == (
+            Attendee("me@x.com", "accepted", is_self=True),
+            Attendee("sam@x.com", "needsAction", optional=True),
+            Attendee("room@r.com", "accepted", resource=True),
+        )
+
+    def test_no_attendees_and_someone_elses_event(self):
+        raw = timed("x", "2026-10-03T15:00:00Z", "2026-10-03T16:00:00Z", organizer={"email": "boss@x.com"})
+        event = parse_event(raw, NY)
+        assert event.attendees == () and event.is_organizer is False
+
     def test_missing_title_and_blank_location(self):
         raw = timed("x", "2026-10-03T15:00:00Z", "2026-10-03T16:00:00Z", location="  ")
         del raw["summary"]
@@ -144,6 +166,49 @@ class TestGetEvent:
         with pytest.raises(ValueError, match="event_id"):
             get_event(source, bad_id, NY)
         assert source.asked == []
+
+
+class TestGoogleCalendarSourceWrites:
+    class Events:
+        def __init__(self):
+            self.calls = []
+
+        def insert(self, **kwargs):
+            self.calls.append(("insert", kwargs))
+            return self
+
+        def patch(self, **kwargs):
+            self.calls.append(("patch", kwargs))
+            return self
+
+        def execute(self):
+            return {}
+
+    @pytest.fixture
+    def source(self):
+        events = self.Events()
+        source = GoogleCalendarSource.__new__(GoogleCalendarSource)
+        source._service = type("Service", (), {"events": lambda self: events})()
+        source._calendar_id = "primary"
+        return source, events
+
+    def test_writes_send_no_emails_by_default(self, source):
+        source, events = source
+        source.insert_event({"summary": "x"})
+        source.patch_event("e1", {"summary": "y"})
+        assert [kwargs["sendUpdates"] for _, kwargs in events.calls] == ["none", "none"]
+
+    def test_invites_can_send_emails(self, source):
+        source, events = source
+        source.insert_event({"summary": "x"}, send_updates="all")
+        source.patch_event("e1", {"attendees": []}, send_updates="all")
+        assert [kwargs["sendUpdates"] for _, kwargs in events.calls] == ["all", "all"]
+
+    def test_single_event_reads_ask_for_attendees_without_names(self, source):
+        source, events = source
+        source.insert_event({"summary": "x"})
+        fields = events.calls[0][1]["fields"]
+        assert "attendees(" in fields and "displayName" not in fields
 
 
 @pytest.mark.parametrize("location, online", [

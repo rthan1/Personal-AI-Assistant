@@ -4,18 +4,23 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from assistant.tools.calendar_edits import (
+    MAX_GUESTS_PER_CHANGE,
     EventTimes,
+    GuestRequest,
     changed_event_times,
+    clean_email,
     clean_location,
     clean_title,
     describe,
     find_conflicts,
     free_slots,
+    merge_attendees,
     new_event_times,
+    parse_guests,
     parse_local_datetime,
     time_fields,
 )
-from assistant.tools.calendar_service import CalendarEvent
+from assistant.tools.calendar_service import Attendee, CalendarEvent
 
 NY = ZoneInfo("America/New_York")
 
@@ -241,3 +246,59 @@ class TestFreeSlots:
         trip = all_day_event(local("00:00"), local("00:00", 7))
         slots = free_slots(span("15:00", "16:00"), [trip, busy("sync", "15:00", "16:00")], NY, EARLY_NOW)
         assert starts(slots) == ["14:00", "16:00"]
+
+
+class TestCleanEmail:
+    def test_lowercases_and_trims(self):
+        assert clean_email("  Sam.Lee@Gmail.COM ") == "sam.lee@gmail.com"
+
+    @pytest.mark.parametrize("value", [None, "", "sam", "sam@", "@gmail.com", "sam@gmail", "a b@x.com",
+                                       "sam@x.com, bob@y.com", "<sam@x.com>", "x" * 250 + "@x.com"])
+    def test_rejects_invalid(self, value):
+        with pytest.raises(ValueError, match="valid email"):
+            clean_email(value)
+
+
+class TestParseGuests:
+    def test_emails_names_and_name_with_email(self):
+        assert parse_guests(["sam@x.com", "Alex", "Jo Smith <JO@y.org>"]) == [
+            GuestRequest(None, "sam@x.com"), GuestRequest("Alex", None), GuestRequest("Jo Smith", "jo@y.org"),
+        ]
+
+    def test_comma_separated_text(self):
+        assert parse_guests("sam@x.com, Alex") == [GuestRequest(None, "sam@x.com"), GuestRequest("Alex", None)]
+
+    def test_blank_items_skipped_and_none_is_empty(self):
+        assert parse_guests(["", "  "]) == [] and parse_guests(None) == []
+
+    def test_quoted_name(self):
+        assert parse_guests(['"Sam" <sam@x.com>']) == [GuestRequest("Sam", "sam@x.com")]
+
+    def test_bad_email_in_brackets(self):
+        with pytest.raises(ValueError, match="valid email"):
+            parse_guests(["Sam <not-an-email>"])
+
+    def test_cap(self):
+        with pytest.raises(ValueError, match=f"At most {MAX_GUESTS_PER_CHANGE}"):
+            parse_guests([f"g{i}@x.com" for i in range(MAX_GUESTS_PER_CHANGE + 1)])
+
+    def test_rejects_other_types(self):
+        with pytest.raises(ValueError, match="guests must be a list"):
+            parse_guests({"email": "sam@x.com"})
+
+
+class TestMergeAttendees:
+    def test_keeps_existing_rsvps_and_adds_new(self):
+        existing = (Attendee("me@x.com", "accepted", is_self=True), Attendee("room@r.com", "accepted", resource=True),
+                    Attendee("opt@x.com", "declined", optional=True))
+        assert merge_attendees(existing, ["new@x.com"]) == [
+            {"email": "me@x.com", "responseStatus": "accepted"},
+            {"email": "room@r.com", "responseStatus": "accepted", "resource": True},
+            {"email": "opt@x.com", "responseStatus": "declined", "optional": True},
+            {"email": "new@x.com"},
+        ]
+
+    def test_skips_people_already_invited_case_insensitively(self):
+        assert merge_attendees((Attendee("Sam@X.com"),), ["sam@x.com", "a@x.com", "a@x.com"]) == [
+            {"email": "Sam@X.com", "responseStatus": "needsAction"}, {"email": "a@x.com"},
+        ]
