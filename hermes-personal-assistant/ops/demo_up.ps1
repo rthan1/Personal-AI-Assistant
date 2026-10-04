@@ -9,11 +9,18 @@ if (-not $envLine) {
 }
 $publicUrl = ($envLine -split '=', 2)[1].Trim().Trim('"', "'").TrimEnd("/") + "/"
 
+function Test-Hermes {
+    [bool](Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
+        Where-Object { $_.CommandLine -like "*hermes_cli.main gateway run*" })
+}
+
 foreach ($name in "Hermes_Gateway", "Assistant_App", "Assistant_Ngrok") {
     if (-not (Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue)) {
         Write-Host "MISSING  scheduled task $name (run install_tasks.ps1)" -ForegroundColor Red
         continue
     }
+    # The Hermes task exits after launching a detached gateway, so IgnoreNew doesn't stop a second one.
+    if ($name -eq "Hermes_Gateway" -and (Test-Hermes)) { continue }
     # Tasks use IgnoreNew, so this is a no-op for ones already running.
     Start-ScheduledTask -TaskName $name
 }
@@ -26,11 +33,6 @@ function Test-Url([string]$url) {
     } catch {
         return $false
     }
-}
-
-function Test-Hermes {
-    [bool](Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
-        Where-Object { $_.CommandLine -like "*hermes_cli.main gateway run*" })
 }
 
 $checks = [ordered]@{
