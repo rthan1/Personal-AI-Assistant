@@ -10,11 +10,17 @@ from googleapiclient.errors import HttpError
 from assistant.storage.memories import Memory, MemoryRepo
 from assistant.storage.pending_changes import PendingChangeRepo
 from assistant.storage.users import User, UserRepo
-from assistant.tools import calendar_edits, calendar_service, clock, departure_planner, maps_service, preferences
+from assistant.tools import (
+    calendar_edits, calendar_service, clock, departure_planner, maps_service, places_service, preferences,
+)
 from assistant.tools.google_auth import GoogleAuthError, can_edit_calendar, credentials_from_token
 
 CalendarSourceFactory = Callable[[Any], calendar_service.EventSource]
 MAX_MEMORY_CONTEXT_CHARS = 2000
+MAX_PLACE_RESULTS = 3
+MAX_PLACE_QUERY_LENGTH = 100
+PLACE_SEARCH_RADIUS_M = {"walk": 3_000, "bicycle": 8_000, "transit": 8_000, "drive": 15_000}
+PRICE_SYMBOLS = {0: "free", 1: "$", 2: "$$", 3: "$$$", 4: "$$$$"}
 
 
 class ToolError(Exception):
@@ -33,6 +39,7 @@ class ToolService:
         travel_times: maps_service.TravelTimeSource | None = None,
         memories: MemoryRepo | None = None,
         pending_changes: PendingChangeRepo | None = None,
+        places: places_service.PlaceSource | None = None,
     ):
         self._users = users
         self._public_base_url = public_base_url.rstrip("/")
@@ -41,6 +48,7 @@ class ToolService:
         self._travel_times = travel_times
         self._memories = memories
         self._pending_changes = pending_changes
+        self._places = places
         self._tools: dict[str, Callable[[User, dict], dict]] = {
             "get_current_time": self.get_current_time,
             "get_events": self.get_events,
@@ -53,6 +61,7 @@ class ToolService:
             "update_event": self.update_event,
             "delete_event": self.delete_event,
             "confirm_change": self.confirm_change,
+            "find_places": self.find_places,
         }
 
     def call(self, tool: str, sender: str, args: dict | None) -> dict:
@@ -346,6 +355,56 @@ class ToolService:
         raise ToolError(f"None of today's remaining events ({titles}) have a location. Ask which one and where it "
                         "is, then call plan_departure with event_id and destination.")
 
+    def find_places(self, user: User, args: dict) -> dict:
+        if self._places is None:
+            raise ToolError("Place search isn't set up on this assistant yet.")
+        query = _clean_place_query(args.get("query"))
+        near = _clean_destination(args.get("near"), "near")
+        if calendar_service.is_online_location(near):
+            raise ValueError("near must be a place or street address, not a link.")
+        open_now = calendar_edits.is_flag_set(args.get("open_now"))
+        min_rating = _parse_min_rating(args.get("min_rating"))
+        max_price = _parse_max_price(args.get("max_price"))
+
+        if args.get("event_id"):
+            searched_near, address = self._place_search_event(user, args["event_id"])
+        elif near:
+            searched_near = address = near
+        else:
+            raise ToolError("No location to search near. Ask the user where to search (a neighborhood, address, or "
+                            "one of their events), then pass it as near or event_id.")
+
+        radius = PLACE_SEARCH_RADIUS_M.get(user.travel_mode, PLACE_SEARCH_RADIUS_M["drive"])
+        try:
+            center = self._places.locate(address)
+            places = self._places.search(query, center, radius, open_now, min_rating, max_price, MAX_PLACE_RESULTS)
+        except places_service.PlacesError as exc:
+            raise ToolError(str(exc)) from exc
+        if not places:
+            return {"searched_near": searched_near, "places": [],
+                    "message": "Nothing matched. Try a broader search or a different area."}
+        return {"searched_near": searched_near,
+                "places": [_place_summary(p, center) for p in places[:MAX_PLACE_RESULTS]]}
+
+    def _place_search_event(self, user: User, event_id: Any) -> tuple[str, str]:
+        """(event title, its physical location) to search around."""
+        tz = ZoneInfo(user.timezone)
+        try:
+            event = calendar_service.get_event(self._calendar_source(user), event_id, tz)
+        except HttpError as exc:
+            if exc.status_code in (404, 410):
+                raise ToolError("No event with that id on the user's calendar. Call get_events to find it.") from exc
+            raise _calendar_error(exc) from exc
+        if event is None:
+            raise ToolError("That event was cancelled.")
+        title = json.dumps(event.title)
+        if calendar_service.is_online_location(event.location):
+            raise ToolError(f"{title} is an online meeting, so there's nowhere to search around. Ask where they want "
+                            "to search, then pass it as near.")
+        if not event.location:
+            raise ToolError(f"{title} has no location on the calendar. Ask where it is, then pass that as near.")
+        return event.title, event.location
+
     def _calendar_source(self, user: User, write: bool = False) -> calendar_service.EventSource:
         return self._calendar_source_factory(self._credentials(user, write))
 
@@ -455,15 +514,68 @@ def _departure_event_summary(event: calendar_service.CalendarEvent | None, tz: Z
     return summary
 
 
-def _clean_destination(value: Any) -> str | None:
+def _clean_destination(value: Any, field: str = "destination") -> str | None:
     if value is None:
         return None
     text = " ".join(str(value).split())
     if not text:
         return None
     if len(text) > preferences.MAX_ADDRESS_LENGTH:
-        raise ValueError(f"destination must be at most {preferences.MAX_ADDRESS_LENGTH} characters.")
+        raise ValueError(f"{field} must be at most {preferences.MAX_ADDRESS_LENGTH} characters.")
     return text
+
+
+def _clean_place_query(value: Any) -> str:
+    text = " ".join(str(value or "").split())
+    if not text:
+        raise ValueError("query is required: what to look for, e.g. \"tacos\" or \"bowling\".")
+    if len(text) > MAX_PLACE_QUERY_LENGTH:
+        raise ValueError(f"query must be at most {MAX_PLACE_QUERY_LENGTH} characters.")
+    return text
+
+
+def _parse_min_rating(value: Any) -> float | None:
+    if value is None or str(value).strip() == "":
+        return None
+    error = "min_rating must be a number from 1 to 5."
+    if isinstance(value, bool):
+        raise ValueError(error)
+    try:
+        rating = float(str(value).strip())
+    except ValueError as exc:
+        raise ValueError(error) from exc
+    if not 1 <= rating <= 5:
+        raise ValueError(error)
+    # Places only accepts half steps.
+    return math.floor(rating * 2) / 2
+
+
+def _parse_max_price(value: Any) -> int | None:
+    if value is None or str(value).strip() == "":
+        return None
+    error = "max_price must be a whole number from 1 ($) to 4 ($$$$)."
+    price = preferences.parse_whole_number(value, error)
+    if not 1 <= price <= 4:
+        raise ValueError(error)
+    return price
+
+
+def _place_summary(place: places_service.Place, center: places_service.LatLng) -> dict:
+    distance = None
+    if place.latitude is not None and place.longitude is not None:
+        distance = round(places_service.distance_miles(center, places_service.LatLng(place.latitude,
+                                                                                      place.longitude)), 1)
+    return {
+        "name": place.name,
+        "kind": place.kind,
+        "address": place.address,
+        "rating": place.rating,
+        "rating_count": place.rating_count,
+        "price": PRICE_SYMBOLS.get(place.price_level),
+        "open_now": place.open_now,
+        "distance_miles": distance,
+        "maps_url": place.maps_url,
+    }
 
 
 def _whole_minutes(duration: timedelta) -> int:

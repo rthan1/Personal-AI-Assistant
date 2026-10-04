@@ -14,7 +14,7 @@ from assistant.storage.db import connect
 from assistant.storage.memories import MemoryRepo
 from assistant.storage.pending_changes import PendingChangeRepo
 from assistant.storage.users import UserRepo
-from assistant.tools import google_auth, maps_service
+from assistant.tools import google_auth, maps_service, places_service
 from assistant.web.app import create_web_app
 
 log = logging.getLogger(__name__)
@@ -22,11 +22,12 @@ log = logging.getLogger(__name__)
 
 def build_servers() -> list[uvicorn.Server]:
     settings = load_settings()
-    travel_times = None
+    travel_times = places = None
     if settings.google_maps_api_key:
         travel_times = maps_service.GoogleRoutesClient(settings.google_maps_api_key)
+        places = places_service.GooglePlacesClient(settings.google_maps_api_key)
     else:
-        log.warning("No GOOGLE_MAPS_API_KEY; plan_departure will report that travel time isn't set up.")
+        log.warning("No GOOGLE_MAPS_API_KEY; plan_departure and find_places will report that they aren't set up.")
     bridge_conn = connect(settings.db_path)
     service = ToolService(
         UserRepo(bridge_conn, settings.secret_key),
@@ -34,6 +35,7 @@ def build_servers() -> list[uvicorn.Server]:
         travel_times=travel_times,
         memories=MemoryRepo(bridge_conn, settings.secret_key),
         pending_changes=PendingChangeRepo(bridge_conn),
+        places=places,
     )
     bridge = uvicorn.Config(
         create_bridge_app(service, settings.bridge_token), host="127.0.0.1", port=settings.bridge_port, log_level="info"

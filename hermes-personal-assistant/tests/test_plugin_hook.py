@@ -50,6 +50,8 @@ def test_hook_fails_open_when_bridge_is_down(plugin, monkeypatch):
     ("set_preference", {"key": "home_address", "value": "1 Main St, Springfield, IL"}),
     ("forget", {"memory_id": 3}),
     ("forget", {"memory_id": "all"}),
+    ("find_places", {"query": "ramen", "near": "Ann Arbor", "max_price": 2, "min_rating": 4.5, "open_now": True}),
+    ("find_places", {"query": "bowling", "event_id": "abc", "min_rating": 4}),
 ])
 def test_schemas_accept_numbers_the_model_sends(plugin, tool, args):
     """Hermes validates arguments against these schemas and never turns numbers into strings."""
@@ -72,5 +74,5 @@ def test_register_adds_tools_and_hook(plugin):
     ctx = Ctx()
     plugin.register(ctx)
     assert ctx.tools == ["get_current_time", "get_events", "get_preferences", "set_preference", "plan_departure",
-                         "remember", "forget", "create_event", "update_event", "delete_event", "confirm_change"]
+                         "remember", "forget", "create_event", "update_event", "delete_event", "confirm_change", "find_places"]
     assert ctx.hooks == ["pre_llm_call"]

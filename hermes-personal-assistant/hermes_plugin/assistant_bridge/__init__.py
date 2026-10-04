@@ -122,6 +122,21 @@ TOOLS = [
         {"change_id": {"type": "integer", "description": "pending_change_id from create/update/delete_event"}},
         required=("change_id",),
     ),
+    _schema(
+        "find_places",
+        "Find restaurants, cafes, bars, or things to do near a place the user names or one of their events "
+        "(Google Maps). Returns up to 3 places with rating, price, open now, distance, and a Google Maps link. Needs "
+        "near or event_id; if the user didn't say where, ask first.",
+        {
+            "query": {"type": "string", "description": "What to look for, e.g. \"ramen\", \"bowling\", \"quiet cafe\""},
+            "near": {"type": "string", "description": "Address, neighborhood, city, or landmark to search around"},
+            "event_id": {"type": "string", "description": "Search around this event's location (id from get_events)"},
+            "open_now": {"type": "boolean", "description": "Only places open right now"},
+            "min_rating": {"type": "number", "description": "Optional minimum Google rating, 1-5"},
+            "max_price": {"type": "integer", "description": "Optional price cap, 1 ($) to 4 ($$$$)"},
+        },
+        required=("query",),
+    ),
 ]
 
 
