@@ -45,7 +45,10 @@ TOOLS = [
         "Save one user preference.",
         {
             "key": {"type": "string", "enum": ["home_address", "travel_mode", "buffer_minutes", "timezone", "name"]},
-            "value": {"type": "string", "description": "travel_mode: drive|transit|walk|bicycle; buffer_minutes: 0-120"},
+            "value": {
+                "type": ["string", "number"],
+                "description": "travel_mode: drive|transit|walk|bicycle; buffer_minutes: 0-120",
+            },
         },
         required=("key", "value"),
     ),
@@ -76,8 +79,48 @@ TOOLS = [
     _schema(
         "forget",
         "Delete one saved note by its id (ids are in the account status note), or all of them with \"all\".",
-        {"memory_id": {"type": "string", "description": "Note id, e.g. \"3\", or \"all\""}},
+        {"memory_id": {"type": ["integer", "string"], "description": "Note id, e.g. 3, or \"all\""}},
         required=("memory_id",),
+    ),
+    _schema(
+        "create_event",
+        "Propose adding an event to the user's Google Calendar. Saves nothing: returns a pending_change_id to "
+        "confirm with confirm_change after the user says yes. Guests can't be added.",
+        {
+            "title": {"type": "string"},
+            "start": {"type": "string", "description": "Local YYYY-MM-DDTHH:MM, or YYYY-MM-DD when all_day"},
+            "end": {"type": "string", "description": "Optional; same format as start. For all_day, the last day"},
+            "duration_minutes": {"type": "integer", "description": "Optional instead of end; default 60"},
+            "all_day": {"type": "boolean", "description": "Optional; true for an all-day event"},
+            "location": {"type": "string", "description": "Optional address or place"},
+        },
+        required=("title", "start"),
+    ),
+    _schema(
+        "update_event",
+        "Propose changing an event (id from get_events). Only pass what changes; moving the start keeps its length. "
+        "Saves nothing: returns a pending_change_id to confirm with confirm_change after the user says yes.",
+        {
+            "event_id": {"type": "string"},
+            "title": {"type": "string", "description": "Optional new title"},
+            "start": {"type": "string", "description": "Optional new local start, YYYY-MM-DDTHH:MM (date for all-day)"},
+            "end": {"type": "string", "description": "Optional new local end, same format"},
+            "location": {"type": "string", "description": "Optional new location"},
+        },
+        required=("event_id",),
+    ),
+    _schema(
+        "delete_event",
+        "Propose deleting an event (id from get_events). For an invite, it's removed from the user's calendar only. "
+        "Saves nothing: returns a pending_change_id to confirm with confirm_change after the user says yes.",
+        {"event_id": {"type": "string"}},
+        required=("event_id",),
+    ),
+    _schema(
+        "confirm_change",
+        "Apply a proposed calendar change. Only call after the user replied yes to that exact change.",
+        {"change_id": {"type": "integer", "description": "pending_change_id from create/update/delete_event"}},
+        required=("change_id",),
     ),
 ]
 

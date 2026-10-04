@@ -3,6 +3,7 @@ from cryptography.fernet import Fernet
 
 from assistant.storage.db import connect
 from assistant.storage.memories import MemoryRepo
+from assistant.storage.pending_changes import PendingChangeRepo
 from assistant.storage.users import UserRepo
 
 
@@ -26,3 +27,8 @@ def repo(conn, secret_key):
 @pytest.fixture
 def memories(conn, secret_key):
     return MemoryRepo(conn, secret_key)
+
+
+@pytest.fixture
+def pending(conn):
+    return PendingChangeRepo(conn)

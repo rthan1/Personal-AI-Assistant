@@ -47,6 +47,11 @@ def test_forget_deletes_note(service, memories, repo):
     assert memories.list(repo.get_by_phone(ANN).id) == []
 
 
+def test_forget_accepts_numeric_id(service):
+    saved = service.call("remember", ANN, {"note": "likes tea"})
+    assert service.call("forget", ANN, {"memory_id": saved["id"]})["ok"] is True
+
+
 def test_forget_accepts_hash_prefixed_id(service):
     saved = service.call("remember", ANN, {"note": "likes tea"})
     assert service.call("forget", ANN, {"memory_id": f"#{saved['id']}"})["ok"] is True

@@ -36,6 +36,17 @@ def test_buffer_minutes():
             validate_preference("buffer_minutes", bad)
 
 
+@pytest.mark.parametrize("value", [20, 20.0, "20"])
+def test_buffer_minutes_accepts_numbers_the_model_sends(value):
+    assert validate_preference("buffer_minutes", value) == 20
+
+
+@pytest.mark.parametrize("value", [20.5, True, None, "1.5"])
+def test_buffer_minutes_rejects_non_whole_numbers(value):
+    with pytest.raises(ValueError, match="whole number"):
+        validate_preference("buffer_minutes", value)
+
+
 def test_timezone():
     assert validate_preference("timezone", "America/Chicago") == "America/Chicago"
     with pytest.raises(ValueError, match="timezone"):

@@ -12,6 +12,7 @@ from assistant.config.settings import load_settings
 from assistant.messaging.photon_users import PhotonUsers
 from assistant.storage.db import connect
 from assistant.storage.memories import MemoryRepo
+from assistant.storage.pending_changes import PendingChangeRepo
 from assistant.storage.users import UserRepo
 from assistant.tools import google_auth, maps_service
 from assistant.web.app import create_web_app
@@ -32,6 +33,7 @@ def build_servers() -> list[uvicorn.Server]:
         settings.public_base_url,
         travel_times=travel_times,
         memories=MemoryRepo(bridge_conn, settings.secret_key),
+        pending_changes=PendingChangeRepo(bridge_conn),
     )
     bridge = uvicorn.Config(
         create_bridge_app(service, settings.bridge_token), host="127.0.0.1", port=settings.bridge_port, log_level="info"

@@ -38,6 +38,21 @@ MIGRATIONS = [
     );
     CREATE INDEX memories_user_id ON memories (user_id);
     """,
+    """
+    CREATE TABLE conversation_turns (
+        user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+        turn INTEGER NOT NULL
+    );
+    CREATE TABLE pending_changes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        action TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        turn INTEGER NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+    );
+    CREATE INDEX pending_changes_user_id ON pending_changes (user_id);
+    """,
 ]
 
 

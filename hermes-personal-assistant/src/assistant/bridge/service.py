@@ -8,9 +8,10 @@ from zoneinfo import ZoneInfo
 from googleapiclient.errors import HttpError
 
 from assistant.storage.memories import Memory, MemoryRepo
+from assistant.storage.pending_changes import PendingChangeRepo
 from assistant.storage.users import User, UserRepo
-from assistant.tools import calendar_service, clock, departure_planner, maps_service, preferences
-from assistant.tools.google_auth import GoogleAuthError, credentials_from_token
+from assistant.tools import calendar_edits, calendar_service, clock, departure_planner, maps_service, preferences
+from assistant.tools.google_auth import GoogleAuthError, can_edit_calendar, credentials_from_token
 
 CalendarSourceFactory = Callable[[Any], calendar_service.EventSource]
 MAX_MEMORY_CONTEXT_CHARS = 2000
@@ -31,6 +32,7 @@ class ToolService:
         now: Callable[[], datetime] = clock.utc_now,
         travel_times: maps_service.TravelTimeSource | None = None,
         memories: MemoryRepo | None = None,
+        pending_changes: PendingChangeRepo | None = None,
     ):
         self._users = users
         self._public_base_url = public_base_url.rstrip("/")
@@ -38,6 +40,7 @@ class ToolService:
         self._now = now
         self._travel_times = travel_times
         self._memories = memories
+        self._pending_changes = pending_changes
         self._tools: dict[str, Callable[[User, dict], dict]] = {
             "get_current_time": self.get_current_time,
             "get_events": self.get_events,
@@ -46,6 +49,10 @@ class ToolService:
             "plan_departure": self.plan_departure,
             "remember": self.remember,
             "forget": self.forget,
+            "create_event": self.create_event,
+            "update_event": self.update_event,
+            "delete_event": self.delete_event,
+            "confirm_change": self.confirm_change,
         }
 
     def call(self, tool: str, sender: str, args: dict | None) -> dict:
@@ -63,8 +70,13 @@ class ToolService:
             return {"error": str(exc)}
 
     def context(self, sender: str) -> dict:
-        """Short note about the sender that the plugin adds to every turn, so the model knows who it's talking to."""
+        """Short note about the sender that the plugin adds to every turn, so the model knows who it's talking to.
+
+        Called once per incoming message, so it also counts the user's turns for confirm_change.
+        """
         user, not_signed_up = self._resolve(sender)
+        if user is not None and self._pending_changes is not None:
+            self._pending_changes.start_turn(user.id)
         if user is None:
             return {"context": (
                 "[Assistant account status] This person is NOT signed up, so no calendar tools will work for them. "
@@ -154,6 +166,101 @@ class ToolService:
             raise ToolError("Memory isn't set up on this assistant yet.")
         return self._memories
 
+    def create_event(self, user: User, args: dict) -> dict:
+        tz = ZoneInfo(user.timezone)
+        title = calendar_edits.clean_title(args.get("title"))
+        location = calendar_edits.clean_location(args.get("location"))
+        times = calendar_edits.new_event_times(args, tz)
+        self._credentials(user, write=True)
+        body = {"summary": title, **calendar_edits.time_fields(times, tz)}
+        if location:
+            body["location"] = location
+        return self._propose(user, "create", {"body": body}, calendar_edits.describe(title, times, location, tz))
+
+    def update_event(self, user: User, args: dict) -> dict:
+        tz = ZoneInfo(user.timezone)
+        event = self._event_to_change(user, args.get("event_id"), tz)
+        body: dict[str, Any] = {}
+        title, location = event.title, event.location
+        if str(args.get("title") or "").strip():
+            title = body["summary"] = calendar_edits.clean_title(args["title"])
+        new_location = calendar_edits.clean_location(args.get("location"))
+        if new_location:
+            location = body["location"] = new_location
+        times = calendar_edits.changed_event_times(event, args, tz)
+        if times is not None:
+            body.update(calendar_edits.time_fields(times, tz))
+        if not body:
+            raise ValueError("Nothing to change. Pass at least one of title, start, end, or location.")
+        summary = {
+            "before": calendar_edits.describe_event(event, tz),
+            "after": calendar_edits.describe(title, times or calendar_edits.event_times(event, tz), location, tz),
+        }
+        return self._propose(user, "update", {"event_id": event.id, "body": body}, summary)
+
+    def delete_event(self, user: User, args: dict) -> dict:
+        tz = ZoneInfo(user.timezone)
+        event = self._event_to_change(user, args.get("event_id"), tz)
+        return self._propose(user, "delete", {"event_id": event.id}, calendar_edits.describe_event(event, tz))
+
+    def confirm_change(self, user: User, args: dict) -> dict:
+        repo = self._pending_repo()
+        change = repo.get(user.id, _parse_change_id(args.get("change_id")))
+        if change is None:
+            raise ToolError("No pending change with that id. Changes expire after 10 minutes; propose it again.")
+        if change.turn >= repo.current_turn(user.id):
+            raise ToolError("The user hasn't replied since this change was proposed. Show them the change and "
+                            "wait for them to say yes before calling confirm_change.")
+        source = self._calendar_source(user, write=True)
+        repo.delete(user.id, change.id)
+        payload, tz = change.payload, ZoneInfo(user.timezone)
+        try:
+            if change.action == "create":
+                raw = source.insert_event(payload["body"])
+            elif change.action == "update":
+                raw = source.patch_event(payload["event_id"], payload["body"])
+            else:
+                source.delete_event(payload["event_id"])
+                raw = None
+        except HttpError as exc:
+            raise _write_error(exc) from exc
+        result = {"ok": True, "action": change.action, "change": payload["summary"]}
+        event = calendar_service.parse_event(raw, tz) if raw else None
+        if event is not None:
+            result["event"] = calendar_service.format_event(event, tz)
+        return result
+
+    def _propose(self, user: User, action: str, payload: dict, summary: dict) -> dict:
+        change = self._pending_repo().create(user.id, action, {**payload, "summary": summary})
+        return {
+            "pending_change_id": change.id,
+            "action": action,
+            "change": summary,
+            "saved": False,
+            "next_step": "Nothing is saved yet. Tell the user exactly what will change and ask them to confirm. "
+                         "Only after they reply yes, call confirm_change with this pending_change_id.",
+        }
+
+    def _event_to_change(self, user: User, event_id: Any, tz: ZoneInfo) -> calendar_service.CalendarEvent:
+        source = self._calendar_source(user, write=True)
+        try:
+            event = calendar_service.get_event(source, event_id, tz)
+        except HttpError as exc:
+            if exc.status_code in (404, 410):
+                raise ToolError("No event with that id on the user's calendar. Call get_events to find it.") from exc
+            raise _calendar_error(exc) from exc
+        if event is None:
+            raise ToolError("That event was already cancelled.")
+        if event.recurring_series:
+            raise ToolError("That id is a whole recurring series. Only single occurrences can be changed; use the "
+                            "occurrence's id from get_events.")
+        return event
+
+    def _pending_repo(self) -> PendingChangeRepo:
+        if self._pending_changes is None:
+            raise ToolError("Calendar editing isn't set up on this assistant yet.")
+        return self._pending_changes
+
     def plan_departure(self, user: User, args: dict) -> dict:
         if self._travel_times is None:
             raise ToolError("Travel time isn't set up on this assistant yet.")
@@ -239,14 +346,21 @@ class ToolService:
         raise ToolError(f"None of today's remaining events ({titles}) have a location. Ask which one and where it "
                         "is, then call plan_departure with event_id and destination.")
 
-    def _calendar_source(self, user: User) -> calendar_service.EventSource:
+    def _calendar_source(self, user: User, write: bool = False) -> calendar_service.EventSource:
+        return self._calendar_source_factory(self._credentials(user, write))
+
+    def _credentials(self, user: User, write: bool = False) -> Any:
         try:
             creds, refreshed = credentials_from_token(self._users.get_google_token(user.id))
         except GoogleAuthError as exc:
             raise ToolError(self._connect_message(user, str(exc))) from exc
         if refreshed:
             self._users.set_google_token(user.id, refreshed)
-        return self._calendar_source_factory(creds)
+        if write and not can_edit_calendar(creds):
+            raise ToolError(self._connect_message(
+                user, "To add, change, or delete events, the assistant needs permission to edit their Google "
+                      "Calendar (they connected it with read-only access)."))
+        return creds
 
 
 def _memory_lines(memories: list[Memory]) -> list[str]:
@@ -265,11 +379,28 @@ def _memory_lines(memories: list[Memory]) -> list[str]:
     return lines
 
 
+def _parse_positive_id(value: Any, error: str) -> int:
+    number = preferences.parse_whole_number(value, error)
+    if number < 1:
+        raise ValueError(error)
+    return number
+
+
 def _parse_memory_id(value: Any) -> int:
-    text = str(value if value is not None else "").strip().lstrip("#")
-    if isinstance(value, bool) or not text.isdigit():
-        raise ValueError('memory_id must be a note id from the account status note, or "all".')
-    return int(text)
+    return _parse_positive_id(value, 'memory_id must be a note id from the account status note, or "all".')
+
+
+def _parse_change_id(value: Any) -> int:
+    return _parse_positive_id(value, "change_id must be the pending_change_id returned when the change was proposed.")
+
+
+def _write_error(exc: HttpError) -> ToolError:
+    if exc.status_code == 403:
+        return ToolError(f"Google refused the change ({exc.reason}). Usually this means only the event's organizer "
+                         "can change it.")
+    if exc.status_code in (404, 410):
+        return ToolError("That event no longer exists on the calendar.")
+    return ToolError(f"Google Calendar request failed ({exc.status_code}): {exc.reason}")
 
 
 def _calendar_error(exc: HttpError) -> ToolError:

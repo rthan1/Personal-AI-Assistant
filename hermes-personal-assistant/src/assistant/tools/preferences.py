@@ -23,6 +23,19 @@ def normalize_phone(raw: str) -> str:
     raise ValueError("Enter a valid phone number, e.g. +1 555 123 4567.")
 
 
+def parse_whole_number(value: Any, error: str) -> int:
+    """An int, a whole float (models send 20.0), or a numeric string like "20" or "#3"; ValueError(error) otherwise."""
+    if isinstance(value, bool) or value is None:
+        raise ValueError(error)
+    try:
+        number = float(str(value).strip().lstrip("#"))
+    except ValueError as exc:
+        raise ValueError(error) from exc
+    if not number.is_integer():
+        raise ValueError(error)
+    return int(number)
+
+
 def validate_preference(key: str, value: Any) -> Any:
     if key not in SETTABLE_PREFERENCES:
         raise ValueError(f"Unknown preference {key!r}. Allowed: {', '.join(SETTABLE_PREFERENCES)}.")
@@ -36,10 +49,7 @@ def validate_preference(key: str, value: Any) -> Any:
         return mode
 
     if key == "buffer_minutes":
-        try:
-            minutes = int(str(value).strip())
-        except ValueError as exc:
-            raise ValueError("buffer_minutes must be a whole number of minutes.") from exc
+        minutes = parse_whole_number(value, "buffer_minutes must be a whole number of minutes.")
         if not 0 <= minutes <= MAX_BUFFER_MINUTES:
             raise ValueError(f"buffer_minutes must be between 0 and {MAX_BUFFER_MINUTES}.")
         return minutes

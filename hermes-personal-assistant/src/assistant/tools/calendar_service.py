@@ -4,7 +4,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
-SINGLE_EVENT_FIELDS = "id,status,summary,start,end,location"
+SINGLE_EVENT_FIELDS = "id,status,summary,start,end,location,recurrence"
 EVENT_FIELDS = f"items({SINGLE_EVENT_FIELDS}),nextPageToken"
 MAX_RANGE_DAYS = 31
 MAX_EVENT_ID_LENGTH = 1024
@@ -19,12 +19,19 @@ class CalendarEvent:
     end: datetime  # UTC
     all_day: bool
     location: str | None
+    recurring_series: bool = False  # the series itself, not one occurrence
 
 
 class EventSource(Protocol):
     def list_events(self, time_min: datetime, time_max: datetime, page_token: str | None) -> dict[str, Any]: ...
 
     def get_event(self, event_id: str) -> dict[str, Any]: ...
+
+    def insert_event(self, body: dict[str, Any]) -> dict[str, Any]: ...
+
+    def patch_event(self, event_id: str, body: dict[str, Any]) -> dict[str, Any]: ...
+
+    def delete_event(self, event_id: str) -> None: ...
 
 
 class GoogleCalendarSource:
@@ -56,6 +63,25 @@ class GoogleCalendarSource:
             .get(calendarId=self._calendar_id, eventId=event_id, fields=SINGLE_EVENT_FIELDS)
             .execute()
         )
+
+    # sendUpdates="none": guests never get emails from the assistant.
+    def insert_event(self, body: dict[str, Any]) -> dict[str, Any]:
+        return (
+            self._service.events()
+            .insert(calendarId=self._calendar_id, body=body, sendUpdates="none", fields=SINGLE_EVENT_FIELDS)
+            .execute()
+        )
+
+    def patch_event(self, event_id: str, body: dict[str, Any]) -> dict[str, Any]:
+        return (
+            self._service.events()
+            .patch(calendarId=self._calendar_id, eventId=event_id, body=body, sendUpdates="none",
+                   fields=SINGLE_EVENT_FIELDS)
+            .execute()
+        )
+
+    def delete_event(self, event_id: str) -> None:
+        self._service.events().delete(calendarId=self._calendar_id, eventId=event_id, sendUpdates="none").execute()
 
 
 def resolve_date_range(start_date: str | None, end_date: str | None, today: date) -> tuple[date, date]:
@@ -97,6 +123,7 @@ def parse_event(raw: dict[str, Any], tz: ZoneInfo) -> CalendarEvent | None:
         end=end,
         all_day=all_day,
         location=(raw.get("location") or "").strip() or None,
+        recurring_series=bool(raw.get("recurrence")),
     )
 
 

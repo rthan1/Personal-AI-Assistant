@@ -41,6 +41,23 @@ def test_hook_fails_open_when_bridge_is_down(plugin, monkeypatch):
     assert plugin._account_context() is None
 
 
+@pytest.mark.parametrize("tool, args", [
+    ("confirm_change", {"change_id": 1}),
+    ("confirm_change", {"change_id": 1.0}),
+    ("create_event", {"title": "Lunch", "start": "2026-10-06T12:00", "duration_minutes": 60}),
+    ("set_preference", {"key": "buffer_minutes", "value": 20}),
+    ("set_preference", {"key": "buffer_minutes", "value": 20.0}),
+    ("set_preference", {"key": "home_address", "value": "1 Main St, Springfield, IL"}),
+    ("forget", {"memory_id": 3}),
+    ("forget", {"memory_id": "all"}),
+])
+def test_schemas_accept_numbers_the_model_sends(plugin, tool, args):
+    """Hermes validates arguments against these schemas and never turns numbers into strings."""
+    jsonschema = pytest.importorskip("jsonschema")
+    schema = next(s for s in plugin.TOOLS if s["name"] == tool)["parameters"]
+    jsonschema.validate(args, schema)
+
+
 def test_register_adds_tools_and_hook(plugin):
     class Ctx:
         def __init__(self):
@@ -55,5 +72,5 @@ def test_register_adds_tools_and_hook(plugin):
     ctx = Ctx()
     plugin.register(ctx)
     assert ctx.tools == ["get_current_time", "get_events", "get_preferences", "set_preference", "plan_departure",
-                         "remember", "forget"]
+                         "remember", "forget", "create_event", "update_event", "delete_event", "confirm_change"]
     assert ctx.hooks == ["pre_llm_call"]
