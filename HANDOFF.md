@@ -1,12 +1,12 @@
 # Handoff – Personal AI Assistant
 
-Last updated: 2026-10-04, ~12:45 AM ET. Read this plus `.cursor/rules/*.mdc` before doing anything, and keep it updated when you finish something.
+Last updated: 2026-10-04, ~1:20 AM ET. Read this plus `.cursor/rules/*.mdc` before doing anything, and keep it updated when you finish something.
 
 **Hackathon demo: Sunday 2026-10-04 at 12:00 PM.** Multi-user iMessage assistant: people sign up on a web page, connect Google Calendar, then text the bot about their schedule.
 
 ## Status
 
-Everything below is built, tested (412 tests: `.\.venv\Scripts\python.exe -m pytest` from `hermes-personal-assistant`), and live.
+Everything below is built, tested (484 tests: `.\.venv\Scripts\python.exe -m pytest` from `hermes-personal-assistant`), and live.
 
 | Feature | Tools | Verified by texting the bot? |
 |---|---|---|
@@ -18,14 +18,16 @@ Everything below is built, tested (412 tests: `.\.venv\Scripts\python.exe -m pyt
 | Per-user memory | `remember`, `forget` | Yes (`remember`); cross-user check not yet shown |
 | Places nearby (Places API (New)) | `find_places` (never assumes home; the bot asks where) | Yes |
 | Event reminders (texts sent by our scheduler) | `set_reminder`, `list_reminders`, `cancel_reminder`, `set_preference default_reminder_minutes` | Yes, one real reminder delivered |
+| Overlap warnings + nearest free slots when creating/moving events | part of `create_event`, `update_event` | Not yet (deployed, unit-tested) |
+| Daily briefing (text of today's events at a chosen local time) | `set_preference briefing_time` | Not yet (deployed, unit-tested) |
 | Help | plain "help" → fixed list in the persona | Not yet |
 
 ## Before the demo
 
-1. **Commit and push.** Calendar editing, places, origin, reminders, and cleanup are uncommitted. Keep phone numbers and the ngrok domain out of committed files.
+1. **Commit and push** the daily briefing, sign-up briefing field, sign-up wording fix, and overlap warnings (everything before them is pushed). Test overlaps by asking to add something on top of an existing event. Then text "send me my schedule every day at <a minute from now>" to check it arrives. Keep phone numbers and the ngrok domain out of committed files.
 2. **Reboot test**: restart, log in, wait ~1 minute, run `ops/demo_up.ps1`, text the bot. This is the first real test of the tasks running non-elevated after the permission fix (see Gotchas).
 3. **Pause Windows Update** until after the demo; the tasks only start after a login.
-4. **Google OAuth consent screen**: confirm it's published ("In production"). In Testing mode only listed test users can sign in and refresh tokens expire after 7 days.
+4. **Google OAuth consent screen**: confirm it's published ("In production"). Branding links: home page `https://<your-ngrok-domain>/`, privacy `/privacy`, terms `/terms` (served by our site; every page's footer links to them). In Testing mode only listed test users can sign in and refresh tokens expire after 7 days.
 5. **Reconnect Google** once on every existing account so editing works (the first edit request sends the link).
 6. **Fix Ethan's home address** (it has no city or state, so Maps can't find it): text the bot the full address.
 7. **QR code** to the landing page.
@@ -39,7 +41,7 @@ Everything below is built, tested (412 tests: `.\.venv\Scripts\python.exe -m pyt
 
 ### Roadmap (pitch, don't build)
 
-Daily briefing (possible now, same delivery path as reminders), reminders not tied to a calendar event, a "time to leave" reminder using `plan_departure`, and closing the bot to strangers after the demo (`PHOTON_ALLOW_ALL_USERS=false`).
+Reminders not tied to a calendar event, a "time to leave" reminder using `plan_departure`, and closing the bot to strangers after the demo (`PHOTON_ALLOW_ALL_USERS=false`).
 
 ## Running it
 
@@ -80,7 +82,7 @@ Browser → ngrok (<your-ngrok-domain>) → :8787 → Google OAuth
    - Registering grants nothing except the ability to text the bot.
 2. The person texts the bot. The plugin's `pre_llm_call` hook calls `/context`, which says "NOT signed up" and includes a personal link `/signup?t=<token>`. The model relays it.
    - The token (table `signup_tokens`) is tied to the **trusted iMessage sender**, valid for 1 hour, and deleted once Google is connected.
-3. The form (name, timezone auto-detected, optional home address, travel mode) **never asks for a phone number**, so nobody can claim someone else's number. Submitting it leads to Google OAuth (single-use `state`, 15 min), then `/done`.
+3. The form (name, timezone auto-detected, optional home address, travel mode, optional daily briefing time; blank means off) **never asks for a phone number**, so nobody can claim someone else's number. Submitting it leads to Google OAuth (single-use `state`, 15 min), then `/done`.
 4. Calendar "not connected / expired" errors include a fresh personal link for reconnecting.
 
 ### Identity and isolation rules
@@ -98,12 +100,13 @@ Browser → ngrok (<your-ngrok-domain>) → :8787 → Google OAuth
 - `run.py`: loads settings; starts the bridge and the site (each with its own SQLite connection; the bridge's repos share one) and the reminder thread (its own connection). Builds `PhotonUsers` when Photon credentials are found, and the Maps clients when `GOOGLE_MAPS_API_KEY` is set. Run from `src`: `..\.venv\Scripts\python.exe -m assistant.run`.
 - `bridge/server.py`: `POST /tools/{tool}`, `POST /context`, `GET /health`. Bearer token checked in constant time, calls serialized with a lock.
 - `bridge/service.py`: `ToolService.call(tool, sender, args)` and `context(sender)`. Unknown sender gets `not_signed_up` plus a personal link. Refreshed Google tokens are saved back. All tools are described under "Tools" below.
-- `web/app.py`: `create_web_app(...)` with Google login and `register_phone` injected, so tests use fakes. Plain HTML via `html.escape`, plus a `RateLimiter`.
+- `web/app.py`: `create_web_app(...)` with Google login and `register_phone` injected, so tests use fakes. Also serves `/privacy` and `/terms` (keep them in step with what the app stores and which services see data). Plain HTML via `html.escape`, plus a `RateLimiter`.
 - `messaging/photon_users.py`: Spectrum users API (`https://spectrum.photon.codes/projects/{id}/users/`, Basic auth with project id and secret). Response shape: `{"data": {"users": [{phoneNumber, assignedPhoneNumber, ...}]}}`.
 - `messaging/hermes_send.py`: `HermesSender.send(phone, text)` runs `hermes.cmd send --to photon:any;-;<E.164> --file <temp utf-8 file> --json` with stdin closed and no window. The body goes through a file because `hermes.cmd` is a batch file and cmd.exe would interpret `&`, `|` and so on. The phone must match E.164. Failures log Hermes's stdout/stderr with numbers masked.
 - `scheduler/reminders.py`: `ReminderScheduler.run_forever` (daemon thread). Every 30 s it sends due reminders; every 5 min it creates automatic reminders for today's and tomorrow's timed events of users with `default_reminder_minutes`, and prunes old rows. Before sending it re-reads the event: cancelled/deleted → skipped, moved → rescheduled, already started → skipped. Failed sends and Google outages retry next tick. The text is a fixed template (no model call): title, start time, "in N min", and location (online meetings say "online meeting", never the link).
+  - Daily briefing, also every tick: users with `briefing_time` (local `HH:MM`) get `briefing_message` (today's events that haven't ended, max 8, fixed template) once per local day, from that time until 1 hour later; after that the day is dropped. `users.briefing_sent_on` (local date) prevents repeats; setting `briefing_time` again clears it, so setting a time that just passed sends within a minute (handy for the demo). Disconnected calendar skips the day; Google errors and failed sends retry within the hour.
 - `config/settings.py`: project `.env`, plus Photon credentials read from **Hermes's** `.env` (then `auth.json`) at startup. Never copy or print them.
-- `storage/db.py`: migrations via `PRAGMA user_version`. 5 shipped (3 `memories`; 4 `conversation_turns`, `pending_changes`; 5 `users.default_reminder_minutes`, `reminders`). **Append, never edit.**
+- `storage/db.py`: migrations via `PRAGMA user_version`. 6 shipped (3 `memories`; 4 `conversation_turns`, `pending_changes`; 5 `users.default_reminder_minutes`, `reminders`; 6 `users.briefing_time`, `users.briefing_sent_on`). **Append, never edit.**
 - `storage/users.py`: `UserRepo` (users, Fernet-encrypted Google token, OAuth state, sign-up tokens, `list_with_default_reminders`).
 - `storage/memories.py`: `MemoryRepo`. Notes are Fernet-encrypted with the same key; 300 characters per note, 30 per user.
 - `storage/pending_changes.py`: `PendingChangeRepo` (`start_turn`, `current_turn`, `create`, `get`, `delete`). Changes expire after 10 minutes. Ids use `AUTOINCREMENT` so an expired id is never reused.
@@ -123,9 +126,11 @@ Browser → ngrok (<your-ngrok-domain>) → :8787 → Google OAuth
 
 - `plan_departure`: `origin` is required in practice (an address/place, or `"home"` / `"my home"` for the saved address, reported as "home address on file" and never echoed); without it the bot is told to ask. `event_id` optional (default: next timed, non-online event today with a location). `destination` is used only when the event has no physical location. `arrive_by` (local `YYYY-MM-DDTHH:MM`, future, ≤ 31 days) replaces the event start; required for all-day events. `destination` + `arrive_by` without `event_id` plans an off-calendar trip. Online meetings are never sent to Maps.
 - `create_event` / `update_event` (only changed fields; moving the start keeps the length) / `delete_event` / `confirm_change(change_id)`: any event on the primary calendar, including invites; Google 403 on confirm becomes "only the organizer can change it".
+  - Overlaps warn, never block: for timed creates and time changes, the proposal adds `conflicts` (max 3 plus `more_conflicts`) and `free_slots` (`calendar_edits.find_conflicts` / `free_slots`, pure): the nearest free slot before and after on the same local day, same length, 7 AM–10 PM, in the future, on a quarter hour or when a busy event ends. All-day events are ignored on both sides, back-to-back isn't a conflict, and a moved event ignores itself. A calendar read failure gives `conflicts_checked: false` and still proposes. To switch to a slot the model proposes again with its `start`.
 - `remember(note)` / `forget(memory_id | "all")`: `context` lists notes newest first, capped at 2,000 characters.
 - `find_places`: `query` plus `event_id` (that event's physical location) or `near`; **never uses the home address**. Radius by travel mode (walk 3 km, bicycle/transit 8 km, drive 15 km). Optional `open_now`, `min_rating` (1–5, floored to half steps), `max_price` (1–4). Returns up to 3 places with rating, price, open now, distance, and `maps_url` (Google's terms require showing it). Results are never stored.
 - `set_reminder(event_id, minutes_before)`: timed, future events only, and the reminder time must still be ahead. `list_reminders` adds titles from one calendar read. `cancel_reminder(reminder_id | "all")`. `set_preference default_reminder_minutes` (0/"off" disables) deletes pending automatic reminders so the scheduler recreates them with the new lead time.
+- `set_preference briefing_time`: "7:30 AM", "7am", "19:30", 7, or "off"/0 (`preferences.parse_clock_time`). Shown in the `/context` note as "daily briefing text".
 
 ### Plugin, tests, git
 
@@ -142,6 +147,8 @@ Browser → ngrok (<your-ngrok-domain>) → :8787 → Google OAuth
 | `PUBLIC_BASE_URL` | `https://<your-ngrok-domain>`. `ops/run_ngrok.ps1` and `ops/demo_up.ps1` read the ngrok domain from here. |
 | `BOT_PHONE` | The bot's iMessage line, shown on the sign-up page if Photon assigns none. Required. |
 | `GOOGLE_MAPS_API_KEY` | Routes API and Places API (New). |
+| `CONTACT_EMAIL` | Optional. Shown on `/privacy` and `/terms` for questions and account deletion (otherwise they point to the Google sign-in screen's developer email). |
+| `GOOGLE_SITE_VERIFICATION` | Optional. Search Console "HTML file" name (e.g. `google1234abcd.html`); the site serves it so the ngrok domain (its own domain, since `ngrok-free.dev` is on the Public Suffix List) can be verified as a URL-prefix property for the OAuth consent screen. A malformed value is logged and ignored. |
 | optional | `ASSISTANT_TIMEZONE`, `WEB_PORT` 8787, `BRIDGE_PORT` 8788, `ASSISTANT_DB_PATH`, `HERMES_CMD` (default `%LOCALAPPDATA%\hermes\bin\hermes.cmd`; reminders are off with a warning if it's missing) |
 
 `data/` (gitignored): `assistant.db`, `logs/`, `web_client.json` (Google **Web** OAuth client, which the site uses), and `credentials.json` (old Desktop client, unused unless a token still references it).
@@ -163,7 +170,7 @@ Browser → ngrok (<your-ngrok-domain>) → :8787 → Google OAuth
   - `memory.memory_enabled: false`, `memory.user_profile_enabled: false`.
   - `agent.system_prompt`: the shared persona. **Update it when tools are added**, including the help list near the end. Don't add `channel_overrides` (they replace the prompt for that chat), and keep `display.personality` unset (it overrides `agent.system_prompt`).
   - `platforms.photon.allow_admin_from` / `group_allow_admin_from: [<Ethan's number>]`, `user_allowed_commands: ["new"]`. **Without an admin list, every user can run any slash command**, including `/model` and `/personality`, which rewrites the global persona. That's also why there's no `/help` for users: help is a plain-message rule in the persona.
-- Backups: one `config.yaml.bak-before-<change>` per persona edit (newest: `bak-before-help`; original: `bak-before-photon-lockdown`), plus `.env.bak-before-open-access`.
+- Backups: one `config.yaml.bak-before-<change>` per persona edit (newest: `bak-before-conflicts`; original: `bak-before-photon-lockdown`), plus `.env.bak-before-open-access`.
 - Don't re-run `hermes photon setup` unless needed.
 
 ## Gotchas for agents
